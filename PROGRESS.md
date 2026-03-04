@@ -76,6 +76,7 @@ _Design docs: [elsa-system](https://github.com/CYMaxwellLee/Elsa-System) / Roadm
 | ExecutionLogger deployed | **Done** | 2026-03-04 |
 | `~/.elsa-system/` dir structure | **Done** | 2026-02-25 |
 | FRESH-MACHINE-RUNBOOK.md | **Done** | 2026-03-04 |
+| Browser (Playwright 1.58.0 + Chrome) | **Done** | OpenClaw built-in browser, 2026-03-04 |
 | API key separation (5 keys) | **Pending** | Manual: console.anthropic.com |
 | `elsa-runtime` connected to GitHub | **Done** | 2026-03-04 |
 | Disk: 46GB free | OK | Phase 1-2 sufficient |

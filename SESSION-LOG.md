@@ -4,6 +4,38 @@ _Reverse chronological. Each session = one Claude Code conversation._
 
 ---
 
+## Session 2 — 2026-03-04 (continued)
+
+**Tool:** Claude Code (Opus 4.6)
+
+### Completed
+- Installed **Playwright** 1.58.0 (python3.11) + Chromium driver 145.0.7632.6 (~255MB)
+- Discovered **OpenClaw has built-in browser** (`openclaw browser` command, Playwright-based, uses Google Chrome)
+- example.com test: PASS (both OpenClaw browser + Playwright Python)
+- arXiv test: PASS — "Memory in the Age of AI Agents"
+- Created `meta/IMPLEMENTATION-STATUS.md` in elsa-system for Claude Chat Project sync
+- Created tracking: PROGRESS.md, SESSION-LOG.md, meta/BACKLOG.md
+
+### Browser Setup Results
+
+| Item | Result |
+|------|--------|
+| Chromium brew install | Skipped — Google Chrome already present |
+| Google Chrome | Detected by OpenClaw at `/Applications/Google Chrome.app` |
+| Playwright install | OK — 1.58.0 |
+| Playwright Chromium driver | OK — 145.0.7632.6 |
+| Plan chosen | OpenClaw built-in browser (no extra MCP needed) |
+| example.com test | PASS |
+| arXiv test | PASS |
+| Elsa Telegram web reading | Not tested (needs owner trigger) |
+
+### Discovered
+- OpenClaw `browser` command is full Playwright wrapper (snapshot, click, navigate, screenshot, etc.)
+- No need for Playwright MCP server or web-fetch skill — OpenClaw handles it natively
+- Google Chrome detected automatically, no Chromium install needed
+
+---
+
 ## Session 1 — 2026-03-04
 
 **Duration:** ~2 hours
