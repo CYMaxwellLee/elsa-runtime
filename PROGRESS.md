@@ -79,6 +79,7 @@ _Design docs: [elsa-system](https://github.com/CYMaxwellLee/Elsa-System) / Roadm
 | Browser (Playwright 1.58.0 + Chrome) | **Done** | OpenClaw built-in browser, 2026-03-04 |
 | RULES-CORE/LOCAL 分層 | **Done** | Symlink + LOCAL template, 2026-03-06 |
 | OAuth Token SOP | **Done** | RUNBOOK documented, 2026-03-06 |
+| Gmail Reader Tool | **Done** (pending credentials) | `tools/gmail/`, OpenClaw skill deployed, 2026-03-06 |
 | API key separation (5 keys) | **Pending** | Manual: console.anthropic.com |
 | `elsa-runtime` connected to GitHub | **Done** | 2026-03-04 |
 | Disk: 46GB free | OK | Phase 1-2 sufficient |
