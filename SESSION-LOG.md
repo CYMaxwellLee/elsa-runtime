@@ -4,11 +4,11 @@ _Reverse chronological. Each session = one Claude Code conversation._
 
 ---
 
-## Session 3 — 2026-03-06
+## Session 3+4 — 2026-03-06
 
 **Tool:** Claude Code (Opus 4.6)
 
-### Completed
+### Completed (Session 3)
 - **RULES-CORE/LOCAL 分層機制**：
   - `templates/RULES.md` → `templates/RULES-CORE.md` (v3.5)，合併 repo v3.4 + live v3.3 內容
   - Elsa workspace 用 symlink 連回 repo，確保更新自動同步
@@ -33,7 +33,23 @@ _Reverse chronological. Each session = one Claude Code conversation._
   - 踩坑：Google 測試使用者加不進去 → 改正式版解決
   - RUNBOOK Stage 4C 完整文件化（含常見問題表）
 
-### Discovered
+### Completed (Session 4 — 延續 Session 3)
+- **Elsa 整合 Gmail skill**：
+  - SOUL.md 加入 Gmail 能力提示（精簡版，含 CLI 指令範例）
+  - TOOLS.md 更新環境細節（帳號、路徑）
+  - 多次 gateway restart 調整後 Elsa 成功讀取未讀信件（Telegram 驗證 PASS）
+- **RULES-CORE.md 安全強化**：
+  - 新增「禁止 agent 自行修改的檔案」規則：SOUL.md / RULES-CORE.md / IDENTITY.md
+  - RULES-LOCAL.md 修改需主人確認
+- **SOUL.md 架構設計**：
+  - 原則確立：「SOUL 管你是誰，SKILL 管你會什麼」
+  - SOUL.md 只放一行能力摘要 + 關鍵指令，詳細用法留在 SKILL.md
+  - 可擴展：未來加工具只多一行，不會膨脹
+- **Claude CLI 設定**：
+  - `/usr/local/bin/claude` symlink 建立（指向 Claude.app 2.1.51 binary）
+  - `claude login` + `claude remote-control` 設定指引
+
+### Discovered (Session 3)
 - OpenAI OAuth token 約 10 天過期，需手動 `paste-token` 更新
 - `openclaw models auth login` 的 provider 選項只有 plugin providers，openai-codex 是 built-in，要用 `paste-token`
 - `openclaw agents config main --model` 不存在，要用 `openclaw config set agents.defaults.model.primary`
@@ -43,10 +59,19 @@ _Reverse chronological. Each session = one Claude Code conversation._
 - Google OAuth refresh token 長期有效（6 個月未使用才過期），不像 OpenAI OAuth 每 10 天要手動更新
 - GPT-5.4 在 OpenClaw openai-codex provider 尚未支援（registry 最高 5.3-codex），ChatGPT Pro OAuth 回 401
 
+### Discovered (Session 4)
+- **OpenClaw `nativeSkills: auto` 不夠用**：SKILL.md 不會自動注入到 agent 的 context，agent 只看到 SOUL.md。SOUL.md 必須有足夠提示（至少一行指令範例），agent 才知道怎麼用工具
+- **SOUL.md 寫太含糊會讓 agent 亂猜**：只寫 "gmail-reader skill" 不夠，GPT-5.2 會以為要用瀏覽器。必須寫「用 shell 執行 CLI，不是瀏覽器」+ 給一行實際指令
+- **gateway restart 時收到的訊息會超時**：重啟期間的 Telegram 訊息會觸發 typing indicator，但 LLM 來不及回應，2 分鐘後超時（typing TTL reached）。重啟後需要重新傳訊息
+- **Claude CLI 不在 PATH**：Claude.app 安裝的 binary 在 `~/Library/Application Support/Claude/claude-code/*/claude`，需手動 symlink 到 `/usr/local/bin/claude`。Mac 可能沒有 `/usr/local/bin/` 目錄，需先 `mkdir -p`
+- **`openclaw restart` 不存在**：正確指令是 `openclaw gateway restart`
+
 ### Architecture Decisions
 - RULES 分兩層：CORE（repo symlink，唯讀）+ LOCAL（agent 自訂）
 - OAuth token 管理：手動 SOP 先行，自動監控排入 BACKLOG（Phase 2 交給 Mayu）
 - Gmail 整合用 Python CLI tool（非 MCP server）：16GB RAM 不跑背景程序，每次呼叫 1-2 秒即結束
+- **SOUL vs SKILL 分離**：SOUL.md 放人格+核心規則+能力一覽（每工具一行），SKILL.md 放完整工具用法。SOUL 不膨脹，SKILL 按需載入
+- **核心檔案保護**：SOUL.md / RULES-CORE.md / IDENTITY.md 禁止 agent 自行修改
 
 ---
 
