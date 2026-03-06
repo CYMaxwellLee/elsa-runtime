@@ -1,6 +1,6 @@
 # Elsa Runtime — Implementation Progress
 
-_Last updated: 2026-03-04_
+_Last updated: 2026-03-06_
 _Design docs: [elsa-system](https://github.com/CYMaxwellLee/Elsa-System) / Roadmap: `ops/14-IMPLEMENTATION-ROADMAP.md`_
 
 ---
@@ -69,7 +69,7 @@ _Design docs: [elsa-system](https://github.com/CYMaxwellLee/Elsa-System) / Roadm
 
 | Item | Status | Date |
 |------|--------|------|
-| OpenClaw installed (2026.2.24) | **Done** | 2026-03-04 |
+| OpenClaw installed (2026.3.2) | **Done** | 2026-03-04 (upgraded 2026-03-06) |
 | Multi-agent verified (`openclaw agents add rei`) | **Done** | 2026-03-04 |
 | Custom skill system tested (hello-world) | **Done** | 2026-03-04 |
 | ChromaDB installed + smoke test | **Done** | 2026-03-04 |
@@ -77,6 +77,8 @@ _Design docs: [elsa-system](https://github.com/CYMaxwellLee/Elsa-System) / Roadm
 | `~/.elsa-system/` dir structure | **Done** | 2026-02-25 |
 | FRESH-MACHINE-RUNBOOK.md | **Done** | 2026-03-04 |
 | Browser (Playwright 1.58.0 + Chrome) | **Done** | OpenClaw built-in browser, 2026-03-04 |
+| RULES-CORE/LOCAL 分層 | **Done** | Symlink + LOCAL template, 2026-03-06 |
+| OAuth Token SOP | **Done** | RUNBOOK documented, 2026-03-06 |
 | API key separation (5 keys) | **Pending** | Manual: console.anthropic.com |
 | `elsa-runtime` connected to GitHub | **Done** | 2026-03-04 |
 | Disk: 46GB free | OK | Phase 1-2 sufficient |

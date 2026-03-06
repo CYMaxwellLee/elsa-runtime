@@ -4,6 +4,40 @@ _Reverse chronological. Each session = one Claude Code conversation._
 
 ---
 
+## Session 3 — 2026-03-06
+
+**Tool:** Claude Code (Opus 4.6)
+
+### Completed
+- **RULES-CORE/LOCAL 分層機制**：
+  - `templates/RULES.md` → `templates/RULES-CORE.md` (v3.5)，合併 repo v3.4 + live v3.3 內容
+  - Elsa workspace 用 symlink 連回 repo，確保更新自動同步
+  - 建立空白 `RULES-LOCAL.md` 供 agent 自訂補充規則
+  - SOUL.md 更新規則系統參照
+  - RUNBOOK 加入 symlink 部署步驟（適用所有未來 agent）
+- **OAuth Token 過期事件排除**：
+  - 症狀：`OAuth token refresh failed for openai-codex`，Elsa 完全無回應
+  - 踩坑：選錯 provider（Copilot Proxy）、選錯帳號（Free plan）、不知道 openai-codex 是 built-in 要用 paste-token
+  - 最終修法：正確帳號 token → `paste-token` → `config set` → `gateway restart`
+- **RUNBOOK 加入 OAuth Token 更新 SOP**（完整 7 步驟 + 常見踩坑表）
+- **OpenClaw 升級** 2026.2.24 → 2026.3.2
+- **瀏覽器能力文件化**：RUNBOOK 加入「階段 4B: 瀏覽器能力」段落
+- **資源管理規則**加入 RULES-CORE（tab 管理、RAM 限制）
+- **GPT-5.4** released（2026-03-05），評估後決定暫不升級（GPT-5.2 到 June 5 仍可用）
+
+### Discovered
+- OpenAI OAuth token 約 10 天過期，需手動 `paste-token` 更新
+- `openclaw models auth login` 的 provider 選項只有 plugin providers，openai-codex 是 built-in，要用 `paste-token`
+- `openclaw agents config main --model` 不存在，要用 `openclaw config set agents.defaults.model.primary`
+- copilot-proxy 需要 VS Code 在 localhost:3000 跑，standalone 環境不適用
+- ChatGPT Pro 帳號（elsalab.nthu）vs 個人帳號（cymaxwelllee）token 不同，Free plan token 無法使用 GPT-5.2
+
+### Architecture Decisions
+- RULES 分兩層：CORE（repo symlink，唯讀）+ LOCAL（agent 自訂）
+- OAuth token 管理：手動 SOP 先行，自動監控排入 BACKLOG（Phase 2 交給 Mayu）
+
+---
+
 ## Session 2 — 2026-03-04 (continued)
 
 **Tool:** Claude Code (Opus 4.6)
