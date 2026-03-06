@@ -24,6 +24,14 @@ _Reverse chronological. Each session = one Claude Code conversation._
 - **瀏覽器能力文件化**：RUNBOOK 加入「階段 4B: 瀏覽器能力」段落
 - **資源管理規則**加入 RULES-CORE（tab 管理、RAM 限制）
 - **GPT-5.4** released（2026-03-05），評估後決定暫不升級（GPT-5.2 到 June 5 仍可用）
+- **Gmail Reader Tool** 完成部署：
+  - Python CLI（`tools/gmail/`）：list / unread / search / read / labels
+  - Google Cloud OAuth 2.0（gmail.readonly scope）
+  - OpenClaw skill `gmail-reader` 部署且認到
+  - setup.sh 一鍵安裝（pip + skill + auth）
+  - 驗證 PASS：165,452 封信，unread/search/labels 全正常
+  - 踩坑：Google 測試使用者加不進去 → 改正式版解決
+  - RUNBOOK Stage 4C 完整文件化（含常見問題表）
 
 ### Discovered
 - OpenAI OAuth token 約 10 天過期，需手動 `paste-token` 更新
@@ -31,10 +39,14 @@ _Reverse chronological. Each session = one Claude Code conversation._
 - `openclaw agents config main --model` 不存在，要用 `openclaw config set agents.defaults.model.primary`
 - copilot-proxy 需要 VS Code 在 localhost:3000 跑，standalone 環境不適用
 - ChatGPT Pro 帳號（elsalab.nthu）vs 個人帳號（cymaxwelllee）token 不同，Free plan token 無法使用 GPT-5.2
+- Google Cloud OAuth consent screen：測試使用者常加不進去（「無法新增不符合資格的帳戶」），直接改正式版更快
+- Google OAuth refresh token 長期有效（6 個月未使用才過期），不像 OpenAI OAuth 每 10 天要手動更新
+- GPT-5.4 在 OpenClaw openai-codex provider 尚未支援（registry 最高 5.3-codex），ChatGPT Pro OAuth 回 401
 
 ### Architecture Decisions
 - RULES 分兩層：CORE（repo symlink，唯讀）+ LOCAL（agent 自訂）
 - OAuth token 管理：手動 SOP 先行，自動監控排入 BACKLOG（Phase 2 交給 Mayu）
+- Gmail 整合用 Python CLI tool（非 MCP server）：16GB RAM 不跑背景程序，每次呼叫 1-2 秒即結束
 
 ---
 
