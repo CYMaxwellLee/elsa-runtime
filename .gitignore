@@ -32,6 +32,10 @@ htmlcov/
 .env
 .env.local
 
+# LanceDB
+.lancedb/
+*.lance
+
 # OS
 .DS_Store
 Thumbs.db
