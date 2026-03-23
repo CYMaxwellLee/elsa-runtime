@@ -1,7 +1,6 @@
 """LanceDB implementation of the VectorStore protocol."""
 from __future__ import annotations
 
-import json
 import logging
 import os
 import random
@@ -69,6 +68,7 @@ class LanceDBStore:
             path = os.path.join(os.path.expanduser("~"), ".elsa-system", "lancedb")
         self._path = path
         self._db: Any = None
+        self._vector_dim: int | None = None
 
     # -- connection ----------------------------------------------------------
 
@@ -82,29 +82,50 @@ class LanceDBStore:
             raise RuntimeError("LanceDBStore not connected. Call connect() first.")
         return self._db
 
+    def _get_vector_dim(self) -> int:
+        if self._vector_dim is not None:
+            return self._vector_dim
+        embedder = _get_embedder()
+        self._vector_dim = embedder.dim
+        return self._vector_dim
+
     # -- table management ----------------------------------------------------
 
     async def ensure_table(self, name: str, schema: dict[str, Any] | None = None) -> None:
-        """Create a table if it does not exist yet.
+        """Ensure table exists with correct schema from Registry.
 
-        Uses a pyarrow schema with columns: id, text, metadata, vector.
+        The `schema` parameter is kept for Protocol compatibility but is
+        ignored in favor of the Schema Registry.
         """
+        from elsa_runtime.storage.schema import get_schema
+        from elsa_runtime.storage.migration import schema_to_arrow, detect_schema_diff
+
         db = self._ensure_connected()
+        dim = self._get_vector_dim()
+
+        table_schema = get_schema(name)
+        arrow_schema = schema_to_arrow(table_schema, vector_dim=dim)
+
         existing = db.list_tables().tables
-        if name in existing:
+        if name not in existing:
+            db.create_table(name, schema=arrow_schema)
+            logger.info("Created table '%s' (dim=%d, cols=%d)", name, dim, len(arrow_schema))
             return
 
-        embedder = _get_embedder()
-        dim = embedder.dim
+        # Table exists — check for schema drift
+        tbl = db.open_table(name)
+        actual_columns = set(tbl.schema.names)
+        diff = detect_schema_diff(table_schema, actual_columns)
 
-        pa_schema = pa.schema([
-            pa.field("id", pa.string()),
-            pa.field("text", pa.string()),
-            pa.field("metadata", pa.string()),
-            pa.field("vector", pa.list_(pa.float32(), dim)),
-        ])
-        db.create_table(name, schema=pa_schema)
-        logger.info("Created table '%s' (dim=%d)", name, dim)
+        if not diff["ok"]:
+            logger.warning(
+                "Schema drift detected for '%s': new fields %s",
+                name, list(diff["new_fields"].keys()),
+            )
+            # For Phase 0 with small data: drop and recreate
+            db.drop_table(name)
+            db.create_table(name, schema=arrow_schema)
+            logger.info("Recreated table '%s' with updated schema", name)
 
     async def list_tables(self) -> list[str]:
         db = self._ensure_connected()
@@ -122,8 +143,14 @@ class LanceDBStore:
         embeddings: list[list[float]] | None = None,
     ) -> list[WriteResult]:
         """Add documents to a table. Auto-embeds if embeddings not provided."""
+        from elsa_runtime.storage.schema import get_schema
+        from elsa_runtime.storage.migration import build_default_row
+
         db = self._ensure_connected()
         tbl = db.open_table(table)
+
+        table_schema = get_schema(table)
+        defaults = build_default_row(table_schema)
 
         if metadatas is None:
             metadatas = [{}] * len(ids)
@@ -134,12 +161,18 @@ class LanceDBStore:
 
         records = []
         for doc_id, text, meta, vec in zip(ids, documents, metadatas, embeddings):
-            records.append({
-                "id": doc_id,
-                "text": text,
-                "metadata": json.dumps(meta, ensure_ascii=False),
-                "vector": vec,
-            })
+            # Start with core fields + defaults for all metadata columns
+            record: dict[str, Any] = {"id": doc_id, "text": text, "vector": vec}
+            record.update(defaults)
+
+            # Overlay with provided metadata (only known fields)
+            for key, value in meta.items():
+                if key in table_schema.fields:
+                    record[key] = value
+                else:
+                    logger.debug("Dropping unknown field '%s' for table '%s'", key, table)
+
+            records.append(record)
 
         tbl.add(records)
 
@@ -159,10 +192,13 @@ class LanceDBStore:
         metadatas: list[dict[str, Any]] | None = None,
     ) -> list[WriteResult]:
         """Update documents by delete + re-add (LanceDB lacks in-place update)."""
+        from elsa_runtime.storage.schema import get_schema
+
         db = self._ensure_connected()
         tbl = db.open_table(table)
+        table_schema = get_schema(table)
 
-        # Read existing records for the given ids to preserve fields not being updated
+        # Read existing records to preserve fields not being updated
         existing_by_id: dict[str, dict[str, Any]] = {}
         for doc_id in ids:
             try:
@@ -175,20 +211,26 @@ class LanceDBStore:
         # Delete old records
         await self.delete(table, ids)
 
-        # Prepare new data
+        # Prepare new data — merge old metadata with new
         new_docs: list[str] = []
         new_metas: list[dict[str, Any]] = []
         for i, doc_id in enumerate(ids):
             old = existing_by_id.get(doc_id, {})
+
             if documents is not None:
                 new_docs.append(documents[i])
             else:
                 new_docs.append(old.get("text", ""))
+
+            # Reconstruct old metadata from top-level columns
+            old_meta = _extract_metadata(old, table_schema)
+
             if metadatas is not None:
-                new_metas.append(metadatas[i])
+                # Merge: old values as base, new values overlay
+                merged = {**old_meta, **metadatas[i]}
+                new_metas.append(merged)
             else:
-                raw = old.get("metadata", "{}")
-                new_metas.append(json.loads(raw) if isinstance(raw, str) else raw)
+                new_metas.append(old_meta)
 
         results = await self.add(table, ids, new_docs, new_metas)
         return [WriteResult(id=r.id, operation="update") for r in results]
@@ -225,70 +267,144 @@ class LanceDBStore:
         if tbl.count_rows() == 0:
             return []
 
+        # Build SQL filter if where clause provided
+        where_sql = _build_filter(where, table) if where else None
+
         results: list[dict[str, Any]] = []
 
         if query_type == "fts":
             q = tbl.search(query, query_type="fts").limit(n)
-            if where:
-                q = q.where(_build_where(where))
+            if where_sql:
+                q = q.where(where_sql)
             results = q.to_list()
 
         elif query_type == "vector":
             embedder = _get_embedder()
             vec = embedder.encode_dense([query])[0]
             q = tbl.search(vec).limit(n)
-            if where:
-                q = q.where(_build_where(where))
+            if where_sql:
+                q = q.where(where_sql)
             results = q.to_list()
 
         else:  # hybrid — try hybrid, fallback to vector
             try:
                 q = tbl.search(query, query_type="hybrid").limit(n)
-                if where:
-                    q = q.where(_build_where(where))
+                if where_sql:
+                    q = q.where(where_sql)
                 results = q.to_list()
             except Exception:
                 logger.debug("Hybrid search unavailable, falling back to vector search")
                 embedder = _get_embedder()
                 vec = embedder.encode_dense([query])[0]
                 q = tbl.search(vec).limit(n)
-                if where:
-                    q = q.where(_build_where(where))
+                if where_sql:
+                    q = q.where(where_sql)
                 results = q.to_list()
 
-        return [_row_to_result(r) for r in results]
+        return [_row_to_result(r, table) for r in results]
 
     async def count(self, table: str, where: dict[str, Any] | None = None) -> int:
         """Return the number of rows in a table."""
         db = self._ensure_connected()
         tbl = db.open_table(table)
         if where:
-            # Use a search to count filtered results
-            rows = tbl.search().where(_build_where(where)).to_list()
+            where_sql = _build_filter(where, table)
+            rows = tbl.search().where(where_sql).to_list()
             return len(rows)
         return tbl.count_rows()
 
     # -- helpers -------------------------------------------------------------
 
 
-def _build_where(where: dict[str, Any]) -> str:
-    """Convert a dict of {field: value} into a SQL-like WHERE clause."""
-    parts: list[str] = []
-    for key, val in where.items():
-        if isinstance(val, str):
-            parts.append(f'{key} = "{val}"')
+def _extract_metadata(row: dict[str, Any], table_schema: Any) -> dict[str, Any]:
+    """Extract metadata fields from a row based on the schema."""
+    skip = {"id", "text", "vector", "_distance", "_score", "_relevance_score"}
+    meta = {}
+    for key in table_schema.fields:
+        if key in row and key not in skip:
+            meta[key] = row[key]
+    return meta
+
+
+def _build_filter(where: dict[str, Any] | None, table_name: str) -> str:
+    """Convert a where dict to a LanceDB SQL filter string.
+
+    Validates that all fields are present in the Schema Registry and filterable.
+    Supports direct equality and operator syntax ($eq, $in, $gt, $lt, $ne, etc.).
+    """
+    if not where:
+        return ""
+
+    from elsa_runtime.storage.schema import get_schema
+
+    table_schema = get_schema(table_name)
+    filterable = table_schema.filterable_fields()
+
+    clauses = []
+    for field_name, condition in where.items():
+        if field_name not in filterable:
+            valid = sorted(filterable)
+            raise ValueError(
+                f"Cannot filter on '{field_name}' in table '{table_name}'. "
+                f"Filterable fields: {valid}"
+            )
+
+        if isinstance(condition, dict):
+            for op, value in condition.items():
+                clauses.append(_op_to_sql(field_name, op, value))
+        elif isinstance(condition, list):
+            # List = implicit $in
+            vals = ", ".join(f"'{v}'" if isinstance(v, str) else str(v) for v in condition)
+            clauses.append(f"{field_name} IN ({vals})")
         else:
-            parts.append(f"{key} = {val}")
-    return " AND ".join(parts)
+            clauses.append(_eq_to_sql(field_name, condition))
+
+    return " AND ".join(clauses)
 
 
-def _row_to_result(row: dict[str, Any]) -> SearchResult:
+def _op_to_sql(field: str, op: str, value: Any) -> str:
+    """Convert operator to SQL."""
+    if op == "$eq":
+        return _eq_to_sql(field, value)
+    elif op == "$in":
+        vals = ", ".join(f"'{v}'" if isinstance(v, str) else str(v) for v in value)
+        return f"{field} IN ({vals})"
+    elif op == "$gt":
+        return f"{field} > {value}"
+    elif op == "$gte":
+        return f"{field} >= {value}"
+    elif op == "$lt":
+        return f"{field} < {value}"
+    elif op == "$lte":
+        return f"{field} <= {value}"
+    elif op == "$ne":
+        return _ne_to_sql(field, value)
+    else:
+        raise ValueError(f"Unknown operator: {op}")
+
+
+def _eq_to_sql(field: str, value: Any) -> str:
+    if isinstance(value, str):
+        return f"{field} = '{value}'"
+    elif isinstance(value, bool):
+        return f"{field} = {str(value).lower()}"
+    else:
+        return f"{field} = {value}"
+
+
+def _ne_to_sql(field: str, value: Any) -> str:
+    if isinstance(value, str):
+        return f"{field} != '{value}'"
+    else:
+        return f"{field} != {value}"
+
+
+def _row_to_result(row: dict[str, Any], table_name: str) -> SearchResult:
     """Convert a LanceDB result row to a SearchResult."""
     # Determine score: LanceDB uses _distance (vector) or _score (fts)
     score = 0.0
     breakdown: dict[str, float] = {}
     if "_distance" in row:
-        # Lower distance = better. Convert to similarity-like score.
         score = 1.0 / (1.0 + row["_distance"])
         breakdown["distance"] = row["_distance"]
     if "_score" in row:
@@ -298,15 +414,9 @@ def _row_to_result(row: dict[str, Any]) -> SearchResult:
         score = row["_relevance_score"]
         breakdown["relevance_score"] = row["_relevance_score"]
 
-    # Deserialize metadata
-    raw_meta = row.get("metadata", "{}")
-    if isinstance(raw_meta, str):
-        try:
-            meta = json.loads(raw_meta)
-        except json.JSONDecodeError:
-            meta = {}
-    else:
-        meta = raw_meta if raw_meta else {}
+    # Reconstruct metadata from top-level columns
+    skip = {"id", "text", "vector", "_distance", "_score", "_relevance_score"}
+    meta = {k: v for k, v in row.items() if k not in skip}
 
     return SearchResult(
         id=row.get("id", ""),

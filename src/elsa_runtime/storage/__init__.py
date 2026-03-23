@@ -1,6 +1,7 @@
 """VectorStore abstraction layer."""
 
 from elsa_runtime.storage.vectorstore import SearchResult, VectorStore, WriteResult
+from elsa_runtime.storage.schema import get_schema, get_all_table_names, SCHEMAS
 
 
 def get_store(backend: str = "lancedb", **kwargs) -> VectorStore:
@@ -11,4 +12,7 @@ def get_store(backend: str = "lancedb", **kwargs) -> VectorStore:
     raise ValueError(f"Unknown backend: {backend}")
 
 
-__all__ = ["VectorStore", "SearchResult", "WriteResult", "get_store"]
+__all__ = [
+    "VectorStore", "SearchResult", "WriteResult", "get_store",
+    "get_schema", "get_all_table_names", "SCHEMAS",
+]

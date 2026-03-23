@@ -42,6 +42,11 @@ class _TestEmbedder:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+# Use "tasks" as the generic test table — it's in the Schema Registry
+# with fields: agent (str, filterable), verified (bool), body (str)
+TABLE = "tasks"
+
+
 @pytest_asyncio.fixture
 async def store(tmp_path):
     """Create a connected LanceDBStore with a test embedder."""
@@ -53,8 +58,8 @@ async def store(tmp_path):
 
 @pytest_asyncio.fixture
 async def store_with_table(store):
-    """Store with a pre-created 'docs' table."""
-    await store.ensure_table("docs")
+    """Store with a pre-created table."""
+    await store.ensure_table(TABLE)
     return store
 
 
@@ -115,16 +120,16 @@ class TestConnection:
 
     @pytest.mark.asyncio
     async def test_ensure_table_creates_table(self, store):
-        await store.ensure_table("my_table")
+        await store.ensure_table("papers")
         tables = await store.list_tables()
-        assert "my_table" in tables
+        assert "papers" in tables
 
     @pytest.mark.asyncio
     async def test_ensure_table_idempotent(self, store):
-        await store.ensure_table("t1")
-        await store.ensure_table("t1")  # should not raise
+        await store.ensure_table("papers")
+        await store.ensure_table("papers")  # should not raise
         tables = await store.list_tables()
-        assert tables.count("t1") == 1
+        assert tables.count("papers") == 1
 
     @pytest.mark.asyncio
     async def test_list_tables_empty(self, store):
@@ -133,10 +138,10 @@ class TestConnection:
 
     @pytest.mark.asyncio
     async def test_list_tables_multiple(self, store):
-        await store.ensure_table("a")
-        await store.ensure_table("b")
+        await store.ensure_table("tasks")
+        await store.ensure_table("errors")
         tables = await store.list_tables()
-        assert sorted(tables) == ["a", "b"]
+        assert sorted(tables) == ["errors", "tasks"]
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +152,7 @@ class TestAdd:
     @pytest.mark.asyncio
     async def test_add_returns_write_results(self, store_with_table):
         results = await store_with_table.add(
-            "docs",
+            TABLE,
             ids=["1", "2"],
             documents=["hello", "world"],
         )
@@ -160,20 +165,20 @@ class TestAdd:
     @pytest.mark.asyncio
     async def test_add_with_metadata(self, store_with_table):
         results = await store_with_table.add(
-            "docs",
+            TABLE,
             ids=["m1"],
             documents=["meta test"],
-            metadatas=[{"key": "value", "num": 42}],
+            metadatas=[{"agent": "elsa", "verified": True}],
         )
         assert len(results) == 1
-        count = await store_with_table.count("docs")
+        count = await store_with_table.count(TABLE)
         assert count == 1
 
     @pytest.mark.asyncio
     async def test_add_with_explicit_embeddings(self, store_with_table):
         vec = [1.0] + [0.0] * (_DIM - 1)
         results = await store_with_table.add(
-            "docs",
+            TABLE,
             ids=["e1"],
             documents=["explicit embedding"],
             embeddings=[vec],
@@ -188,12 +193,12 @@ class TestAdd:
 class TestCount:
     @pytest.mark.asyncio
     async def test_count_empty(self, store_with_table):
-        assert await store_with_table.count("docs") == 0
+        assert await store_with_table.count(TABLE) == 0
 
     @pytest.mark.asyncio
     async def test_count_after_add(self, store_with_table):
-        await store_with_table.add("docs", ids=["1", "2"], documents=["a", "b"])
-        assert await store_with_table.count("docs") == 2
+        await store_with_table.add(TABLE, ids=["1", "2"], documents=["a", "b"])
+        assert await store_with_table.count(TABLE) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -203,18 +208,18 @@ class TestCount:
 class TestSearch:
     @pytest.mark.asyncio
     async def test_empty_search(self, store_with_table):
-        results = await store_with_table.search("docs", "anything")
+        results = await store_with_table.search(TABLE, "anything")
         assert results == []
 
     @pytest.mark.asyncio
     async def test_vector_search(self, store_with_table):
         await store_with_table.add(
-            "docs",
+            TABLE,
             ids=["v1", "v2"],
             documents=["machine learning", "deep learning"],
         )
         results = await store_with_table.search(
-            "docs", "machine learning", n=2, query_type="vector",
+            TABLE, "machine learning", n=2, query_type="vector",
         )
         assert len(results) > 0
         assert all(isinstance(r, SearchResult) for r in results)
@@ -224,12 +229,12 @@ class TestSearch:
     @pytest.mark.asyncio
     async def test_fts_search(self, store_with_table):
         await store_with_table.add(
-            "docs",
+            TABLE,
             ids=["f1", "f2"],
             documents=["the quick brown fox", "lazy dog sleeps"],
         )
         results = await store_with_table.search(
-            "docs", "fox", n=5, query_type="fts",
+            TABLE, "fox", n=5, query_type="fts",
         )
         assert len(results) >= 1
         assert results[0].id == "f1"
@@ -239,25 +244,27 @@ class TestSearch:
     async def test_hybrid_search_fallback(self, store_with_table):
         """Hybrid should work (or gracefully fall back to vector)."""
         await store_with_table.add(
-            "docs",
+            TABLE,
             ids=["h1"],
             documents=["hybrid search test"],
         )
         results = await store_with_table.search(
-            "docs", "hybrid search test", n=5, query_type="hybrid",
+            TABLE, "hybrid search test", n=5, query_type="hybrid",
         )
         assert len(results) >= 1
 
     @pytest.mark.asyncio
     async def test_search_with_where_filter(self, store_with_table):
+        """Filter by agent field (a filterable field in tasks schema)."""
         await store_with_table.add(
-            "docs",
+            TABLE,
             ids=["w1", "w2"],
             documents=["apple fruit", "banana fruit"],
+            metadatas=[{"agent": "elsa"}, {"agent": "rei"}],
         )
         results = await store_with_table.search(
-            "docs", "fruit", n=10, query_type="vector",
-            where={"id": "w1"},
+            TABLE, "fruit", n=10, query_type="vector",
+            where={"agent": "elsa"},
         )
         assert len(results) == 1
         assert results[0].id == "w1"
@@ -271,20 +278,20 @@ class TestUpdate:
     @pytest.mark.asyncio
     async def test_update_document(self, store_with_table):
         await store_with_table.add(
-            "docs", ids=["u1"], documents=["original text"],
+            TABLE, ids=["u1"], documents=["original text"],
         )
         results = await store_with_table.update(
-            "docs", ids=["u1"], documents=["updated text"],
+            TABLE, ids=["u1"], documents=["updated text"],
         )
         assert len(results) == 1
         assert results[0].operation == "update"
 
         # Verify the content was updated via vector search
-        count = await store_with_table.count("docs")
+        count = await store_with_table.count(TABLE)
         assert count == 1
 
         search_results = await store_with_table.search(
-            "docs", "updated text", n=1, query_type="fts",
+            TABLE, "updated text", n=1, query_type="fts",
         )
         assert len(search_results) == 1
         assert search_results[0].content == "updated text"
@@ -298,43 +305,45 @@ class TestDelete:
     @pytest.mark.asyncio
     async def test_delete_single(self, store_with_table):
         await store_with_table.add(
-            "docs", ids=["d1", "d2"], documents=["one", "two"],
+            TABLE, ids=["d1", "d2"], documents=["one", "two"],
         )
-        deleted = await store_with_table.delete("docs", ids=["d1"])
+        deleted = await store_with_table.delete(TABLE, ids=["d1"])
         assert deleted == 1
-        assert await store_with_table.count("docs") == 1
+        assert await store_with_table.count(TABLE) == 1
 
     @pytest.mark.asyncio
     async def test_delete_multiple(self, store_with_table):
         await store_with_table.add(
-            "docs", ids=["d1", "d2", "d3"], documents=["a", "b", "c"],
+            TABLE, ids=["d1", "d2", "d3"], documents=["a", "b", "c"],
         )
-        deleted = await store_with_table.delete("docs", ids=["d1", "d3"])
+        deleted = await store_with_table.delete(TABLE, ids=["d1", "d3"])
         assert deleted == 2
-        assert await store_with_table.count("docs") == 1
+        assert await store_with_table.count(TABLE) == 1
 
     @pytest.mark.asyncio
     async def test_delete_nonexistent(self, store_with_table):
-        deleted = await store_with_table.delete("docs", ids=["nope"])
+        deleted = await store_with_table.delete(TABLE, ids=["nope"])
         assert deleted == 0
 
 
 # ---------------------------------------------------------------------------
-# Metadata serialization round-trip
+# Metadata round-trip (using schema-registered fields)
 # ---------------------------------------------------------------------------
 
 class TestMetadata:
     @pytest.mark.asyncio
     async def test_metadata_roundtrip(self, store_with_table):
-        meta = {"type": "test", "tags": ["a", "b"], "count": 5}
+        meta = {"agent": "elsa", "verified": True, "body": "test content"}
         await store_with_table.add(
-            "docs",
+            TABLE,
             ids=["mt1"],
             documents=["metadata roundtrip"],
             metadatas=[meta],
         )
         results = await store_with_table.search(
-            "docs", "metadata roundtrip", n=1, query_type="fts",
+            TABLE, "metadata roundtrip", n=1, query_type="fts",
         )
         assert len(results) == 1
-        assert results[0].metadata == meta
+        assert results[0].metadata["agent"] == "elsa"
+        assert results[0].metadata["verified"] is True
+        assert results[0].metadata["body"] == "test content"
