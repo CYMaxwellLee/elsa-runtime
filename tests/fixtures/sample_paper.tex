@@ -1,0 +1,40 @@
+% tests/fixtures/sample_paper.tex
+\documentclass{article}
+\begin{document}
+\title{A Sample Paper for Testing}
+\maketitle
+
+\begin{abstract}
+This is the abstract of our sample paper about testing.
+\end{abstract}
+
+\section{Introduction}
+This section introduces the problem we address. We build on prior work \cite{smith2024}.
+
+\section{Method}
+\subsection{Problem Setup}
+We define the problem formally. Let $x \in \mathbb{R}^d$ be the input.
+
+\subsection{Our Approach}
+We propose a novel approach using \textbf{attention mechanisms}.
+
+\begin{equation}
+\mathcal{L} = \sum_{i=1}^{N} \ell(f(x_i), y_i)
+\end{equation}
+
+\section{Experiments}
+We evaluate on three benchmarks. Results are in Table \ref{tab:results}.
+
+\begin{table}[h]
+\begin{tabular}{lcc}
+Method & Acc & F1 \\
+\hline
+Baseline & 85.2 & 83.1 \\
+Ours & \textbf{91.7} & \textbf{90.3} \\
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+We presented a method that achieves state-of-the-art results.
+
+\end{document}
