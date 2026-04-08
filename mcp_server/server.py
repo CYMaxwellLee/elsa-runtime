@@ -31,7 +31,7 @@ if _runtime_src not in sys.path:
 from elsa_runtime.storage import get_store
 from elsa_runtime.knowledge.insight_store import InsightStore
 
-mcp = FastMCP("elsa-knowledge")
+mcp = FastMCP("elsa-knowledge", host="0.0.0.0", port=9100)
 
 # Shared state -- initialized on first tool call
 _store = None
@@ -473,10 +473,11 @@ def main():
     if args.lancedb_path:
         _lancedb_path_override = args.lancedb_path
 
-    if args.transport == "sse":
-        mcp.run(transport="sse", host=args.host, port=args.port)
-    else:
-        mcp.run()
+    # Override host/port from CLI args
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
+
+    mcp.run(transport=args.transport)
 
 
 if __name__ == "__main__":
