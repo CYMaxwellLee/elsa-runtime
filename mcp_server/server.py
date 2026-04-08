@@ -1,16 +1,24 @@
 """Elsa Knowledge MCP Server.
 
 Exposes elsa-runtime knowledge infrastructure via MCP protocol.
-Runs as stdio server for Claude Code integration.
+Supports both stdio (Claude Code subprocess) and HTTP SSE (standalone daemon).
 
 Usage:
+    # stdio (default, Claude Code integration)
     python -m mcp_server.server
+
+    # HTTP SSE (standalone daemon, multi-agent)
+    python -m mcp_server.server --transport sse --port 9100
 """
 
+import argparse
 import asyncio
 import json
 import os
+import re
 import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -25,15 +33,16 @@ from elsa_runtime.knowledge.insight_store import InsightStore
 
 mcp = FastMCP("elsa-knowledge")
 
-# Shared state — initialized on first tool call
+# Shared state -- initialized on first tool call
 _store = None
 _insight_store = None
+_lancedb_path_override = None
 
 
 async def _get_store():
     global _store
     if _store is None:
-        lancedb_path = os.environ.get(
+        lancedb_path = _lancedb_path_override or os.environ.get(
             "ELSA_LANCEDB_PATH",
             str(Path.home() / ".elsa-system" / "lancedb"),
         )
@@ -115,6 +124,7 @@ async def insight_query(
     topic: str,
     lifecycle: str = "active",
     n: int = 5,
+    agent_id: str = "",
 ) -> str:
     """Query accumulated insights from the InsightStore.
 
@@ -122,10 +132,16 @@ async def insight_query(
         topic: Topic keywords to search.
         lifecycle: Lifecycle filter. Options: active, dormant, archived, expired.
         n: Number of results (default 5).
+        agent_id: Optional. Filter by agent (elsa, rei, luna, etc.). Empty = all agents.
     """
     istore = await _get_insight_store()
     lifecycle_list = [lifecycle] if lifecycle else None
     results = await istore.query_insights(topic, lifecycle=lifecycle_list, limit=n)
+
+    # Post-filter by agent_id if specified (InsightStore doesn't natively filter by agent)
+    if agent_id:
+        results = [r for r in results if r.metadata.get("agent") == agent_id]
+
     return json.dumps(
         [
             {
@@ -210,10 +226,258 @@ def nstc_extract(
         outdir: Output directory for extracted files.
     """
     return json.dumps(
-        {"error": "nstc_extract is not yet implemented. Coming in Phase 0-C."},
+        {"error": "nstc_extract is not yet implemented. Coming in Phase 1."},
         ensure_ascii=False,
     )
 
 
+# ── Tool 5: save_insight ──
+
+# Guards for save_insight
+TEMPORAL_PATTERNS = ["今天", "本次", "剛才", "最近", "暫時", "這次", "昨天", "明天"]
+CRED_PATTERNS = ["api_key", "token", "password", "secret", "sk-ant-", "sk-"]
+VALID_DOMAINS = {"research", "implementation", "ops", "communication", "orchestration"}
+VALID_SOURCE_TYPES = {
+    "paper_analysis", "email_triage", "meeting_prep",
+    "daily_observation", "user_correction",
+}
+VALID_AGENTS = {"elsa", "rei", "luna", "hikari", "mayu", "ririka"}
+
+
+@mcp.tool()
+async def save_insight(
+    content: str,
+    domain: str,
+    source_type: str,
+    agent_id: str,
+    source_ref: str = "",
+    confidence: float = 0.7,
+) -> str:
+    """Save a distilled insight to long-term knowledge.
+
+    Guards: rejects temporal content, too short/long, credentials.
+    Deduplicates against existing insights (cosine > 0.92 = NOOP).
+
+    Args:
+        content: Distilled knowledge, 2-3 sentences, 20-500 chars.
+        domain: One of: research, implementation, ops, communication, orchestration.
+        source_type: One of: paper_analysis, email_triage, meeting_prep, daily_observation, user_correction.
+        agent_id: Which agent is saving (elsa, rei, luna, hikari, mayu, ririka).
+        source_ref: Optional reference (arXiv ID, email subject, meeting title).
+        confidence: 0.0-1.0. User-confirmed=0.9, observed=0.7, guessed=0.5.
+    """
+    # === Guard 1: Temporal patterns (05-MEMORY L3) ===
+    if any(p in content for p in TEMPORAL_PATTERNS):
+        return json.dumps(
+            {"operation": "REJECTED", "reason": "contains temporal words, not suitable for long-term memory"},
+            ensure_ascii=False,
+        )
+
+    # === Guard 2: Length ===
+    if len(content) < 20:
+        return json.dumps(
+            {"operation": "REJECTED", "reason": f"too short ({len(content)} chars, min 20)"},
+            ensure_ascii=False,
+        )
+    if len(content) > 500:
+        return json.dumps(
+            {"operation": "REJECTED", "reason": f"too long ({len(content)} chars, max 500), please distill"},
+            ensure_ascii=False,
+        )
+
+    # === Guard 3: Credential filter ===
+    if any(p in content.lower() for p in CRED_PATTERNS):
+        return json.dumps(
+            {"operation": "REJECTED", "reason": "suspected credential in content"},
+            ensure_ascii=False,
+        )
+
+    # === Guard 4: Domain/source_type/agent validation ===
+    if domain not in VALID_DOMAINS:
+        return json.dumps(
+            {"operation": "REJECTED", "reason": f"invalid domain '{domain}', must be one of {sorted(VALID_DOMAINS)}"},
+            ensure_ascii=False,
+        )
+    if source_type not in VALID_SOURCE_TYPES:
+        return json.dumps(
+            {"operation": "REJECTED", "reason": f"invalid source_type '{source_type}', must be one of {sorted(VALID_SOURCE_TYPES)}"},
+            ensure_ascii=False,
+        )
+    if agent_id not in VALID_AGENTS:
+        return json.dumps(
+            {"operation": "REJECTED", "reason": f"invalid agent_id '{agent_id}', must be one of {sorted(VALID_AGENTS)}"},
+            ensure_ascii=False,
+        )
+
+    # === Semantic Dedup (05c consolidate_before_write) ===
+    store = await _get_store()
+    try:
+        similar = await store.search("insights", content, n=3)
+        if similar:
+            top = similar[0]
+            if top.score > 0.92:
+                return json.dumps(
+                    {
+                        "operation": "NOOP",
+                        "reason": f"highly similar to existing insight {top.id} (sim={top.score:.2f})",
+                    },
+                    ensure_ascii=False,
+                )
+            # TODO [Phase 1, needs LLM client]: LLM merge judge for similarity 0.75-0.92
+            #   Use LLM to decide UPDATE vs ADD
+            #   Ref: 05c-INSIGHT-SYSTEM.md consolidate_before_write
+    except Exception:
+        pass  # Table may not exist yet, skip dedup
+
+    # TODO [Phase 1, needs LLM client]: Guard 4 context-aware check
+    #   Simulate injecting insight into typical query, verify result is sensible
+    #   Phase 1: sample 1 in 10, Phase 2: all
+    #   Ref: 05-MEMORY-SYSTEM.md L3 Guard 4
+
+    # === Write via InsightStore ===
+    istore = await _get_insight_store()
+    insight_id = await istore.create_insight(
+        agent=agent_id,
+        domain=domain,
+        task_type=source_type,
+        content=content,
+        confidence=confidence,
+        context=source_ref,
+        scope="self",  # Phase 0: always self; TODO [Phase 2]: scope="team" auto-write to Knowledge Graph
+    )
+
+    # TODO [Phase 2]: times_referenced auto-increment
+    #   On every knowledge_search/insight_query hit, increment counter
+    #   Ref: 05c-INSIGHT-SYSTEM.md lifecycle
+
+    return json.dumps(
+        {"operation": "ADD", "reason": "passed all guards, written", "insight_id": insight_id},
+        ensure_ascii=False,
+    )
+
+
+# ── Tool 6: update_insight ──
+
+@mcp.tool()
+async def update_insight(
+    insight_id: str,
+    new_content: str,
+    agent_id: str,
+    reason: str = "",
+) -> str:
+    """Update an existing insight's content. Preserves created_at.
+
+    Args:
+        insight_id: The insight ID to update.
+        new_content: New content to replace the old.
+        agent_id: Who is updating.
+        reason: Optional reason for the update.
+    """
+    store = await _get_store()
+    try:
+        results = await store.update(
+            "insights",
+            ids=[insight_id],
+            documents=[new_content],
+            metadatas=[{
+                "updated_at": datetime.now().isoformat(),
+                "updated_by": agent_id,
+                "update_reason": reason,
+            }],
+        )
+        if not results or results[0].operation == "noop":
+            return json.dumps(
+                {"operation": "NOT_FOUND", "insight_id": insight_id},
+                ensure_ascii=False,
+            )
+    except Exception:
+        return json.dumps(
+            {"operation": "NOT_FOUND", "insight_id": insight_id},
+            ensure_ascii=False,
+        )
+
+    return json.dumps(
+        {"operation": "UPDATED", "insight_id": insight_id},
+        ensure_ascii=False,
+    )
+
+
+# ── Tool 7: list_recent_insights ──
+
+@mcp.tool()
+async def list_recent_insights(
+    n: int = 10,
+    domain: str = "",
+    agent_id: str = "",
+) -> str:
+    """List recently saved insights, optionally filtered by domain or agent.
+
+    Args:
+        n: Number of insights to return (default 10).
+        domain: Optional filter by domain (research, implementation, ops, communication, orchestration).
+        agent_id: Optional filter by agent (elsa, rei, luna, etc.).
+    """
+    store = await _get_store()
+
+    # Use a broad search to get recent insights, then filter
+    # LanceDB doesn't have native "order by created_at", so we search with a generic query
+    where = {"lifecycle": "active"}
+    if domain:
+        where["domain"] = domain
+    if agent_id:
+        where["agent"] = agent_id
+
+    try:
+        results = await store.search("insights", "insight knowledge", n=n * 3, where=where)
+    except Exception:
+        return json.dumps([], ensure_ascii=False)
+
+    # Sort by created_at descending, take n
+    def get_created(r):
+        return r.metadata.get("created_at", "")
+
+    results.sort(key=get_created, reverse=True)
+    results = results[:n]
+
+    return json.dumps(
+        [
+            {
+                "id": r.id,
+                "content": r.content[:500],
+                "metadata": r.metadata,
+            }
+            for r in results
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+# ── Entry point ──
+
+def main():
+    parser = argparse.ArgumentParser(description="Elsa Knowledge MCP Server")
+    parser.add_argument(
+        "--transport", default="stdio", choices=["stdio", "sse"],
+        help="Transport mode: stdio (Claude Code subprocess) or sse (HTTP daemon)",
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="Bind address (sse only)")
+    parser.add_argument("--port", type=int, default=9100, help="Listen port (sse only)")
+    parser.add_argument(
+        "--lancedb-path", default=None,
+        help="LanceDB data path (default: ~/.elsa-system/lancedb or ELSA_LANCEDB_PATH env)",
+    )
+    args = parser.parse_args()
+
+    global _lancedb_path_override
+    if args.lancedb_path:
+        _lancedb_path_override = args.lancedb_path
+
+    if args.transport == "sse":
+        mcp.run(transport="sse", host=args.host, port=args.port)
+    else:
+        mcp.run()
+
+
 if __name__ == "__main__":
-    mcp.run()
+    main()
