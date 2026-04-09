@@ -21,6 +21,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 from mcp.server.fastmcp import FastMCP
 
 # Ensure elsa-runtime src is importable
@@ -31,7 +33,22 @@ if _runtime_src not in sys.path:
 from elsa_runtime.storage import get_store
 from elsa_runtime.knowledge.insight_store import InsightStore
 
-mcp = FastMCP("elsa-knowledge", host="0.0.0.0", port=9100)
+mcp = FastMCP("elsa-knowledge", host="0.0.0.0", port=9100, stateless_http=True)
+
+# Workspace registry for ACTIVE-INSIGHTS.md auto-promote
+WORKSPACE_REGISTRY = {}
+
+
+def load_workspace_registry(path: str | None):
+    global WORKSPACE_REGISTRY
+    if path and Path(path).exists():
+        with open(path) as f:
+            data = yaml.safe_load(f)
+            WORKSPACE_REGISTRY = data.get("workspaces", {})
+    elif Path("config/workspace_registry.yaml").exists():
+        with open("config/workspace_registry.yaml") as f:
+            data = yaml.safe_load(f)
+            WORKSPACE_REGISTRY = data.get("workspaces", {})
 
 # Shared state -- initialized on first tool call
 _store = None
@@ -393,9 +410,27 @@ async def save_insight(
     #   On every knowledge_search/insight_query hit, increment counter
     #   Ref: 05c-INSIGHT-SYSTEM.md lifecycle
 
+    from mcp_server.active_insights import promote_insight
+
+    promoted_to = promote_insight(
+        content=content,
+        domain=domain,
+        source_type=source_type,
+        confidence=confidence,
+        agent_id=agent_id,
+        insight_id=insight_id,
+        created_at=datetime.now().isoformat(),
+        registry=WORKSPACE_REGISTRY,
+    )
+
     result = {"operation": "ADD", "reason": "passed all guards, written", "insight_id": insight_id, "domain": domain}
     if domain not in CANONICAL_DOMAINS:
         result["warning"] = f"new domain '{domain}' created — consider adding to CANONICAL_DOMAINS if recurring"
+    if promoted_to:
+        result["promoted_to"] = [Path(p).name for p in promoted_to]
+        result["tier"] = "Tier 1 (push)"
+    else:
+        result["tier"] = "Tier 2 (pull-only)"
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -438,6 +473,10 @@ async def update_insight(
             {"operation": "NOT_FOUND", "insight_id": insight_id},
             ensure_ascii=False,
         )
+
+    from mcp_server.active_insights import update_insight_in_active
+
+    update_insight_in_active(insight_id, new_content, WORKSPACE_REGISTRY)
 
     return json.dumps(
         {"operation": "UPDATED", "insight_id": insight_id},
@@ -510,11 +549,17 @@ def main():
         "--lancedb-path", default=None,
         help="LanceDB data path (default: ~/.elsa-system/lancedb or ELSA_LANCEDB_PATH env)",
     )
+    parser.add_argument(
+        "--workspace-registry", default=None,
+        help="Path to workspace_registry.yaml for ACTIVE-INSIGHTS.md auto-promote",
+    )
     args = parser.parse_args()
 
     global _lancedb_path_override
     if args.lancedb_path:
         _lancedb_path_override = args.lancedb_path
+
+    load_workspace_registry(args.workspace_registry)
 
     # Override host/port from CLI args
     mcp.settings.host = args.host

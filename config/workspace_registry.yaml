@@ -1,0 +1,9 @@
+# Workspace Registry: MCP server 需要知道每個 agent 的 workspace 路徑
+# 用於 ACTIVE-INSIGHTS.md auto-promote
+# Phase 0: 只有 Elsa
+# Phase 2+: 加入 Rei, Luna 等
+
+workspaces:
+  elsa: /Users/cymaxwelllee/Projects/elsa-workspace
+  # rei: /Users/cymaxwelllee/Projects/rei-workspace
+  # luna: /Users/cymaxwelllee/Projects/luna-workspace
