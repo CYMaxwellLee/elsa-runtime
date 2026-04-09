@@ -236,7 +236,49 @@ def nstc_extract(
 # Guards for save_insight
 TEMPORAL_PATTERNS = ["今天", "本次", "剛才", "最近", "暫時", "這次", "昨天", "明天"]
 CRED_PATTERNS = ["api_key", "token", "password", "secret", "sk-ant-", "sk-"]
-VALID_DOMAINS = {"research", "implementation", "ops", "communication", "orchestration"}
+CANONICAL_DOMAINS = {
+    "research", "implementation", "ops", "communication", "orchestration",
+    "collaboration", "competition", "logistics", "teaching",
+}
+# Alias map: variant → canonical. Keeps categories from fragmenting.
+DOMAIN_ALIASES = {
+    # research
+    "paper": "research", "papers": "research", "論文": "research", "研究": "research",
+    "ml": "research", "ai": "research", "method": "research",
+    # implementation
+    "impl": "implementation", "code": "implementation", "coding": "implementation",
+    "engineering": "implementation", "dev": "implementation", "實作": "implementation",
+    "system": "implementation", "infra": "implementation", "infrastructure": "implementation",
+    # ops
+    "operations": "ops", "admin": "ops", "行政": "ops", "營運": "ops",
+    # communication
+    "email": "communication", "meeting": "communication", "信件": "communication",
+    "溝通": "communication", "人脈": "communication",
+    # orchestration
+    "workflow": "orchestration", "pipeline": "orchestration", "協調": "orchestration",
+    # collaboration
+    "collab": "collaboration", "合作": "collaboration", "合作案": "collaboration",
+    "partnership": "collaboration",
+    # competition
+    "contest": "competition", "hackathon": "competition", "比賽": "competition",
+    "競賽": "competition", "challenge": "competition",
+    # logistics
+    "housing": "logistics", "travel": "logistics", "住宿": "logistics",
+    "生活": "logistics", "搬家": "logistics",
+    # teaching
+    "course": "teaching", "教學": "teaching", "lecture": "teaching",
+    "課程": "teaching", "student": "teaching",
+}
+
+
+def normalize_domain(raw: str) -> str:
+    """Normalize domain to canonical form. Returns canonical domain or original lowercase."""
+    d = raw.strip().lower().replace(" ", "_").replace("-", "_")
+    if d in CANONICAL_DOMAINS:
+        return d
+    if d in DOMAIN_ALIASES:
+        return DOMAIN_ALIASES[d]
+    return d  # allow new domains, but pass through normalized
 VALID_SOURCE_TYPES = {
     "paper_analysis", "email_triage", "meeting_prep",
     "daily_observation", "user_correction",
@@ -260,7 +302,7 @@ async def save_insight(
 
     Args:
         content: Distilled knowledge, 2-3 sentences, 20-500 chars.
-        domain: One of: research, implementation, ops, communication, orchestration.
+        domain: Category (auto-normalized). Standard: research, implementation, ops, communication, orchestration, collaboration, competition, logistics, teaching. Aliases accepted (e.g. "paper"→"research", "合作"→"collaboration").
         source_type: One of: paper_analysis, email_triage, meeting_prep, daily_observation, user_correction.
         agent_id: Which agent is saving (elsa, rei, luna, hikari, mayu, ririka).
         source_ref: Optional reference (arXiv ID, email subject, meeting title).
@@ -293,11 +335,12 @@ async def save_insight(
         )
 
     # === Guard 4: Domain/source_type/agent validation ===
-    if domain not in VALID_DOMAINS:
+    if not domain or not domain.strip():
         return json.dumps(
-            {"operation": "REJECTED", "reason": f"invalid domain '{domain}', must be one of {sorted(VALID_DOMAINS)}"},
+            {"operation": "REJECTED", "reason": f"domain cannot be empty, pick from: {sorted(CANONICAL_DOMAINS)}"},
             ensure_ascii=False,
         )
+    domain = normalize_domain(domain)
     if source_type not in VALID_SOURCE_TYPES:
         return json.dumps(
             {"operation": "REJECTED", "reason": f"invalid source_type '{source_type}', must be one of {sorted(VALID_SOURCE_TYPES)}"},
@@ -350,10 +393,10 @@ async def save_insight(
     #   On every knowledge_search/insight_query hit, increment counter
     #   Ref: 05c-INSIGHT-SYSTEM.md lifecycle
 
-    return json.dumps(
-        {"operation": "ADD", "reason": "passed all guards, written", "insight_id": insight_id},
-        ensure_ascii=False,
-    )
+    result = {"operation": "ADD", "reason": "passed all guards, written", "insight_id": insight_id, "domain": domain}
+    if domain not in CANONICAL_DOMAINS:
+        result["warning"] = f"new domain '{domain}' created — consider adding to CANONICAL_DOMAINS if recurring"
+    return json.dumps(result, ensure_ascii=False)
 
 
 # ── Tool 6: update_insight ──
@@ -458,8 +501,8 @@ async def list_recent_insights(
 def main():
     parser = argparse.ArgumentParser(description="Elsa Knowledge MCP Server")
     parser.add_argument(
-        "--transport", default="stdio", choices=["stdio", "sse"],
-        help="Transport mode: stdio (Claude Code subprocess) or sse (HTTP daemon)",
+        "--transport", default="stdio", choices=["stdio", "sse", "streamable-http"],
+        help="Transport mode: stdio (Claude Code subprocess), sse (legacy HTTP), or streamable-http (recommended HTTP daemon)",
     )
     parser.add_argument("--host", default="0.0.0.0", help="Bind address (sse only)")
     parser.add_argument("--port", type=int, default=9100, help="Listen port (sse only)")

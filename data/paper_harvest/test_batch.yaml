@@ -1,0 +1,15 @@
+papers:
+  - arxiv_id: "2303.04137"
+    title: "Diffusion Policy"
+    tier: A
+    domain: robot_learning
+
+  - arxiv_id: "2305.18290"
+    title: "Direct Preference Optimization"
+    tier: A
+    domain: preference_learning
+
+  - arxiv_id: "2310.06825"
+    title: "Eureka: Human-Level Reward Design via Coding LLMs"
+    tier: A
+    domain: robot_learning
