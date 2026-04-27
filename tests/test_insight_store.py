@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from elsa_runtime.knowledge.insight_store import InsightStore
+from elsa_runtime.knowledge.insight_store import (
+    InsightStore,
+    is_deprecated_content,
+)
 from elsa_runtime.storage.vectorstore import SearchResult, WriteResult, VectorStore
 
 
@@ -139,6 +142,143 @@ async def test_deprecate_insight(insight_store: InsightStore, mock_store):
             "superseded_by": new_id,
         }],
     )
+
+
+# ── Content-lifecycle invariant: [DEPRECATED] → archived ─────────────────
+
+
+class TestIsDeprecatedContent:
+    """Helper function: detect [DEPRECATED] content prefix."""
+
+    def test_basic_prefix(self):
+        assert is_deprecated_content("[DEPRECATED — superseded by foo] old content")
+
+    def test_lowercase(self):
+        assert is_deprecated_content("[deprecated] old content")
+
+    def test_with_leading_whitespace(self):
+        assert is_deprecated_content("   [DEPRECATED] content")
+
+    def test_no_prefix(self):
+        assert not is_deprecated_content("Authors often hide ablations in appendix.")
+
+    def test_deprecated_in_middle_does_not_match(self):
+        # The marker must be a prefix; mid-content [DEPRECATED] shouldn't trigger.
+        assert not is_deprecated_content("This insight noted that [DEPRECATED] in some context.")
+
+    def test_empty_string(self):
+        assert not is_deprecated_content("")
+
+    def test_none_safe(self):
+        assert not is_deprecated_content(None)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_create_insight_deprecated_content_is_archived(
+    insight_store: InsightStore,
+):
+    """create_insight with [DEPRECATED] content must set lifecycle=archived."""
+    await insight_store.create_insight(
+        agent="rei",
+        domain="research",
+        task_type="paper_analysis",
+        content="[DEPRECATED — replaced by insight-rei-newer] old finding text.",
+        confidence=0.85,
+    )
+    insight_store.store.add.assert_called_once()
+    metadata = insight_store.store.add.call_args[1]["metadatas"][0]
+    assert metadata["lifecycle"] == "archived"
+
+
+@pytest.mark.asyncio
+async def test_create_insight_normal_content_is_active(
+    insight_store: InsightStore,
+):
+    """Sanity check: normal content still gets lifecycle=active."""
+    await insight_store.create_insight(
+        agent="rei",
+        domain="research",
+        task_type="paper_analysis",
+        content="Authors often hide ablations in appendix.",
+        confidence=0.85,
+    )
+    insight_store.store.add.assert_called_once()
+    metadata = insight_store.store.add.call_args[1]["metadatas"][0]
+    assert metadata["lifecycle"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_update_content_deprecated_sets_archived(
+    insight_store: InsightStore, mock_store
+):
+    """update_content with [DEPRECATED] content must set lifecycle=archived."""
+    insight_id = "insight-rei-20260316-abc123"
+
+    updated = await insight_store.update_content(
+        insight_id,
+        "[DEPRECATED] superseded by another insight.",
+        agent_id="rei",
+        reason="merged",
+    )
+    assert updated is True
+
+    mock_store.update.assert_called_once()
+    call = mock_store.update.call_args
+    assert call[1]["ids"] == [insight_id]
+    assert call[1]["documents"] == ["[DEPRECATED] superseded by another insight."]
+    metadata = call[1]["metadatas"][0]
+    assert metadata["lifecycle"] == "archived"
+    assert metadata["updated_by"] == "rei"
+    assert metadata["update_reason"] == "merged"
+    assert "updated_at" in metadata
+
+
+@pytest.mark.asyncio
+async def test_update_content_normal_does_not_force_lifecycle(
+    insight_store: InsightStore, mock_store
+):
+    """Normal content update should NOT touch lifecycle field."""
+    insight_id = "insight-rei-20260316-abc123"
+
+    await insight_store.update_content(
+        insight_id,
+        "A revised finding with more nuance.",
+        agent_id="rei",
+    )
+
+    metadata = mock_store.update.call_args[1]["metadatas"][0]
+    # lifecycle key should not be present — caller can update_lifecycle separately
+    assert "lifecycle" not in metadata
+
+
+@pytest.mark.asyncio
+async def test_update_content_returns_false_when_not_found(
+    insight_store: InsightStore, mock_store
+):
+    """update_content should return False when the insight doesn't exist."""
+    mock_store.update.return_value = [WriteResult(id="missing", operation="noop")]
+    result = await insight_store.update_content(
+        "nonexistent-id", "new content", agent_id="rei"
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_update_content_one_way_deprecation(
+    insight_store: InsightStore, mock_store
+):
+    """Removing the [DEPRECATED] prefix on update does NOT auto-revive."""
+    insight_id = "insight-rei-20260316-abc123"
+
+    # Update from deprecated to non-deprecated content
+    await insight_store.update_content(
+        insight_id,
+        "An updated, no-longer-deprecated finding.",
+    )
+
+    metadata = mock_store.update.call_args[1]["metadatas"][0]
+    # No lifecycle override — caller must explicitly resurrect via update_lifecycle
+    assert "lifecycle" not in metadata
 
 
 @pytest.mark.asyncio

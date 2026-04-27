@@ -6,10 +6,26 @@ Migrated from ChromaDB to VectorStore abstraction in Phase 3 (v3.40).
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 
 from elsa_runtime.storage.vectorstore import VectorStore, SearchResult
+
+
+# Content-lifecycle invariant: when an insight's content starts with the
+# "[DEPRECATED" marker (with optional whitespace), its lifecycle is forced
+# to "archived". Without this, agents that overwrite content with a deprecation
+# note routinely forget to update the lifecycle field, leaving stale entries
+# in the active set.
+_DEPRECATED_CONTENT_RE = re.compile(r"^\s*\[DEPRECATED", re.IGNORECASE)
+
+
+def is_deprecated_content(content: str) -> bool:
+    """Return True if `content` carries the conventional [DEPRECATED ...] prefix."""
+    if not content:
+        return False
+    return bool(_DEPRECATED_CONTENT_RE.match(content))
 
 
 class InsightStore:
@@ -43,6 +59,9 @@ class InsightStore:
         insight_id = f"insight-{agent}-{datetime.now(tz=timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
         now = datetime.now(tz=timezone.utc).isoformat()
 
+        # Content-lifecycle invariant: [DEPRECATED] prefix forces archived.
+        lifecycle = "archived" if is_deprecated_content(content) else "active"
+
         metadata = {
             "type": "insight",
             "agent": agent,
@@ -50,7 +69,7 @@ class InsightStore:
             "task_type": task_type,
             "confidence": confidence,
             "scope": scope,
-            "lifecycle": "active",
+            "lifecycle": lifecycle,
             "times_referenced": 0,
             "times_adopted": 0,
             "created_at": now,
@@ -91,6 +110,44 @@ class InsightStore:
             where=where,
             query_type="hybrid",
         )
+
+    async def update_content(
+        self,
+        insight_id: str,
+        new_content: str,
+        *,
+        agent_id: str = "",
+        reason: str = "",
+    ) -> bool:
+        """Update an insight's content. Enforces the [DEPRECATED]→archived invariant.
+
+        Returns True on successful update, False if the insight was not found.
+
+        Note: deprecation flow is one-way. If new_content starts with
+        "[DEPRECATED", lifecycle is forced to "archived". Removing the prefix
+        on a later update does NOT auto-revive — call update_lifecycle() if
+        you want to resurrect a deprecated insight.
+        """
+        metadata: dict = {
+            "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        if agent_id:
+            metadata["updated_by"] = agent_id
+        if reason:
+            metadata["update_reason"] = reason
+
+        if is_deprecated_content(new_content):
+            metadata["lifecycle"] = "archived"
+
+        results = await self.store.update(
+            self.TABLE_NAME,
+            ids=[insight_id],
+            documents=[new_content],
+            metadatas=[metadata],
+        )
+        if not results:
+            return False
+        return results[0].operation != "noop"
 
     async def update_lifecycle(self, insight_id: str, new_stage: str) -> None:
         """Update insight lifecycle stage."""

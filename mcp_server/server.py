@@ -33,7 +33,7 @@ if _runtime_src not in sys.path:
 from elsa_runtime.storage import get_store
 from elsa_runtime.knowledge.insight_store import InsightStore
 
-mcp = FastMCP("elsa-knowledge", host="0.0.0.0", port=9100, stateless_http=True)
+mcp = FastMCP("elsa-knowledge", host="0.0.0.0", port=9100)
 
 # Workspace registry for ACTIVE-INSIGHTS.md auto-promote
 WORKSPACE_REGISTRY = {}
@@ -451,19 +451,17 @@ async def update_insight(
         agent_id: Who is updating.
         reason: Optional reason for the update.
     """
-    store = await _get_store()
+    # Route through InsightStore so the [DEPRECATED]→archived content-lifecycle
+    # invariant is enforced (see insight_store.is_deprecated_content).
+    istore = await _get_insight_store()
     try:
-        results = await store.update(
-            "insights",
-            ids=[insight_id],
-            documents=[new_content],
-            metadatas=[{
-                "updated_at": datetime.now().isoformat(),
-                "updated_by": agent_id,
-                "update_reason": reason,
-            }],
+        updated = await istore.update_content(
+            insight_id,
+            new_content,
+            agent_id=agent_id,
+            reason=reason,
         )
-        if not results or results[0].operation == "noop":
+        if not updated:
             return json.dumps(
                 {"operation": "NOT_FOUND", "insight_id": insight_id},
                 ensure_ascii=False,
