@@ -533,6 +533,104 @@ async def list_recent_insights(
     )
 
 
+# ── Tool 8: create_draft_reply (Gmail thread-aware draft) ──
+
+# Lazy-loaded Gmail composer; the google-api-python-client deps are heavy and
+# only relevant when this tool is actually called.
+_gmail_composer = None
+
+
+def _get_gmail_composer():
+    """Lazy-init GmailComposer. Reads creds from ~/.elsa-system/gmail/."""
+    global _gmail_composer
+    if _gmail_composer is not None:
+        return _gmail_composer
+
+    from elsa_runtime.tools.gmail.auth import get_service
+    from elsa_runtime.tools.gmail.compose import GmailComposer
+
+    gmail_dir = Path.home() / ".elsa-system" / "gmail"
+    creds_file = gmail_dir / "credentials.json"
+    token_file = gmail_dir / "token.json"
+    scopes = [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+    ]
+    service = get_service(creds_file, token_file, scopes)
+    _gmail_composer = GmailComposer(service)
+    return _gmail_composer
+
+
+@mcp.tool()
+async def create_draft_reply(
+    thread_id: str,
+    to: list[str],
+    body: str,
+    subject: str = "",
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    in_reply_to_message_id: str = "",
+) -> str:
+    """Create a Gmail draft attached to an existing thread (proper threaded reply).
+
+    Use this instead of the Anthropic-managed `create_draft` connector when
+    you want the draft to appear as a reply in the original conversation
+    thread (where the user expects to find it). The Anthropic connector
+    cannot do this — its drafts always become orphan new threads.
+
+    Args:
+        thread_id: Gmail thread ID. Get it from search_threads / get_thread.
+        to: Primary recipient email addresses.
+        body: Plain-text body of the reply.
+        subject: Optional. If empty, derived from the original message
+            (Re: original-subject) when in_reply_to_message_id is provided.
+        cc, bcc: Optional CC/BCC lists.
+        in_reply_to_message_id: Optional RFC 2822 Message-ID of the email
+            being replied to (e.g. "<abc@mail.gmail.com>"). Improves
+            threading in non-Gmail clients via In-Reply-To/References headers.
+
+    Returns:
+        JSON string with operation status and draft ID.
+    """
+    try:
+        composer = _get_gmail_composer()
+        draft = composer.create_draft_reply(
+            thread_id=thread_id,
+            to=to,
+            body=body,
+            subject=subject or None,
+            cc=cc,
+            bcc=bcc,
+            in_reply_to_message_id=in_reply_to_message_id or None,
+        )
+        return json.dumps(
+            {
+                "operation": "DRAFT_CREATED",
+                "draft_id": draft.get("id"),
+                "thread_id": thread_id,
+                "message_id": draft.get("message", {}).get("id"),
+            },
+            ensure_ascii=False,
+        )
+    except FileNotFoundError as e:
+        return json.dumps(
+            {
+                "operation": "AUTH_REQUIRED",
+                "error": str(e),
+                "hint": (
+                    "Run: python3 ~/Projects/elsa-runtime/src/elsa_runtime/"
+                    "tools/gmail/gmail_tool.py auth"
+                ),
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps(
+            {"operation": "ERROR", "error": str(e)},
+            ensure_ascii=False,
+        )
+
+
 # ── Entry point ──
 
 def main():

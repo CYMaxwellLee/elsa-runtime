@@ -26,7 +26,13 @@ from pathlib import Path
 GMAIL_DIR = Path.home() / ".elsa-system" / "gmail"
 CREDENTIALS_FILE = GMAIL_DIR / "credentials.json"
 TOKEN_FILE = GMAIL_DIR / "token.json"
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+# 2026-04-28: added `gmail.compose` for create_draft_reply (threadId-aware
+# draft creation that the Anthropic-managed connector lacks). This scope
+# technically allows send too, but our code never exposes a send path.
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.compose",
+]
 DEFAULT_MAX_RESULTS = 10
 
 
