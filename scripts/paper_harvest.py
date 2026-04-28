@@ -139,12 +139,22 @@ def analyze_split_result(sections: list, warnings: list[str]) -> dict:
     }
 
 
+async def is_already_ingested(store: LanceDBStore, paper_id: str) -> int:
+    """Check if any sections for this paper_id are already in LanceDB.
+    Returns existing section count (0 = not ingested, >0 = at least partial)."""
+    try:
+        return await store.count(TABLE_NAME, where={"arxiv_id": paper_id})
+    except Exception:
+        return 0
+
+
 async def ingest_paper(
     splitter: PaperSplitter,
     store: LanceDBStore | None,
     entry: dict,
     dry_run: bool,
     batch_size: int,
+    skip_if_exists: bool = True,
 ) -> dict:
     """Ingest a single paper. Returns a status dict."""
     source = resolve_source(entry)
@@ -153,6 +163,30 @@ async def ingest_paper(
     domain = entry.get("domain", "")
 
     logger.info("Processing: %s (%s)", source, title or "no title")
+
+    # Resume support: skip if already ingested. We use the arxiv_id as the
+    # idempotency key. paper_id from splitter.split() == arxiv_id for arXiv
+    # entries; for local PDFs it's the filename stem (also stable).
+    if not dry_run and skip_if_exists and store is not None:
+        # Best guess for paper_id without doing a full split: use entry's
+        # arxiv_id if present (matches what splitter would produce for arXiv).
+        prejudge_id = entry.get("arxiv_id") or ""
+        if prejudge_id:
+            existing = await is_already_ingested(store, prejudge_id)
+            if existing > 0:
+                logger.info(
+                    "  SKIP (already in DB): %d sections for %s",
+                    existing, prejudge_id,
+                )
+                return {
+                    "source": source,
+                    "title": title,
+                    "tier": tier,
+                    "domain": domain,
+                    "method": "cached",
+                    "status": "already_ingested",
+                    "sections": existing,
+                }
 
     result = splitter.split(source, title=title)
     sections = result.sections
@@ -451,13 +485,18 @@ async def main():
             time.sleep(ARXIV_RATE_LIMIT_SECONDS)
 
     # Summary
-    ok = sum(1 for r in results if r["status"] in ("ok", "dry_run"))
+    new = sum(1 for r in results if r["status"] == "ok")
+    dry = sum(1 for r in results if r["status"] == "dry_run")
+    already = sum(1 for r in results if r["status"] == "already_ingested")
     failed = sum(1 for r in results if r["status"] == "error")
     logger.info("=" * 60)
-    logger.info(
-        "DONE: %d processed | %d succeeded | %d failed | %d yaml-skipped",
-        len(results), ok, failed, skipped_in_yaml,
-    )
+    if dry > 0:
+        logger.info("DONE (dry-run): %d processed | %d failed", len(results), failed)
+    else:
+        logger.info(
+            "DONE: %d processed | %d new | %d already-in-db | %d failed | %d yaml-skipped",
+            len(results), new, already, failed, skipped_in_yaml,
+        )
     if failed:
         logger.warning("Failed papers:")
         for r in results:

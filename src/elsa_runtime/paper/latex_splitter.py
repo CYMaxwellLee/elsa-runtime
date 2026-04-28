@@ -39,17 +39,19 @@ class ArxivLatexSplitter(BaseSplitter):
 
     ARXIV_EPRINT_URL = "https://arxiv.org/e-print/{arxiv_id}"
 
-    # Match \section{...}, \subsection{...}, \subsubsection{...}, \paragraph{...}
-    # Also handles \section*{...} (unnumbered)
+    # Match \section{...} and \subsection{...} only (also `*` variants).
+    # 2026-04-28: previously also matched \subsubsection and \paragraph but
+    # modern arXiv papers use \paragraph as inline labels (Datasets:,
+    # Metrics:, Baselines:, ...) which inflates section count from ~10 to
+    # ~30+. Filtering to section/subsection gives chunks that match the
+    # reader's mental model of paper structure.
     SECTION_PATTERN = re.compile(
-        r"\\(section|subsection|subsubsection|paragraph)\*?\{([^}]+)\}"
+        r"\\(section|subsection)\*?\{([^}]+)\}"
     )
 
     LEVEL_MAP = {
         "section": 1,
         "subsection": 2,
-        "subsubsection": 3,
-        "paragraph": 4,
     }
 
     def split(self, arxiv_id: str) -> list[Section]:
