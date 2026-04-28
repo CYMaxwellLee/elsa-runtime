@@ -1,10 +1,17 @@
 """
 latex_splitter.py — Extract sections from arXiv LaTeX source.
+
+Handles modern arXiv papers that split content across multiple .tex files
+via `\\input{...}` / `\\include{...}` by recursively expanding includes
+before section parsing. Without this, ~75% of post-2023 arXiv papers
+collapse to a single "Full Document" section because their main file just
+holds preamble + `\\input{sections/...}` calls (verified 2026-04-28 dry-run).
 """
 
 import re
 import io
 import gzip
+import logging
 import tarfile
 
 import requests
@@ -12,6 +19,19 @@ from pathlib import Path
 
 from .splitter import BaseSplitter, Section, SplitMethod, SourceUnavailable
 from .latex_cleaner import clean_latex
+
+logger = logging.getLogger(__name__)
+
+# `\input{path}` and `\include{path}` — also `\subfile{path}` and `\import{dir}{file}` (less common).
+# We strip line comments BEFORE applying this regex, so a `% \input{x}` comment doesn't trigger.
+_INCLUDE_RE = re.compile(
+    r"\\(?:input|include|subfile)\s*\{([^}]+)\}"
+)
+# Inline `% ...` comment stripping. Preserves escaped \% (literal percent).
+# Apply line-by-line; doesn't handle multi-line `\iffalse...\fi` blocks (rare).
+_COMMENT_RE = re.compile(r"(?<!\\)%.*$", re.MULTILINE)
+
+_MAX_INPUT_DEPTH = 10  # Defensive: hard stop on circular includes.
 
 
 class ArxivLatexSplitter(BaseSplitter):
@@ -38,16 +58,35 @@ class ArxivLatexSplitter(BaseSplitter):
         Args:
             arxiv_id: e.g. "2401.12345" or "2401.12345v2"
         """
-        tex_content = self._download_and_find_main_tex(arxiv_id)
+        tex_content = self._download_and_assemble_tex(arxiv_id)
         return self._parse_sections(tex_content)
 
     def split_from_file(self, tex_path: str) -> list[Section]:
-        """Parse a local .tex file (for testing without network)."""
-        content = Path(tex_path).read_text(encoding="utf-8", errors="ignore")
-        return self._parse_sections(content)
+        """Parse a local .tex file (for testing without network).
 
-    def _download_and_find_main_tex(self, arxiv_id: str) -> str:
-        """Download arXiv source tarball and find the main .tex file."""
+        Resolves `\\input` / `\\include` against the directory containing
+        `tex_path`. Falls back to original (unexpanded) content for missing
+        includes.
+        """
+        path = Path(tex_path)
+        content = path.read_text(encoding="utf-8", errors="ignore")
+        # Build a virtual file map: {relative_path_to_root: content} from the
+        # directory tree under the .tex file's parent.
+        root = path.parent
+        files: dict[str, str] = {}
+        for p in root.rglob("*.tex"):
+            rel = str(p.relative_to(root))
+            try:
+                files[rel] = p.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+        expanded = self._expand_includes(content, files)
+        return self._parse_sections(expanded)
+
+    # ── Tex assembly (download + include expansion) ─────────────────────
+
+    def _download_and_assemble_tex(self, arxiv_id: str) -> str:
+        """Download arXiv source, find main .tex, recursively expand includes."""
         url = self.ARXIV_EPRINT_URL.format(arxiv_id=arxiv_id)
 
         try:
@@ -59,69 +98,188 @@ class ArxivLatexSplitter(BaseSplitter):
             )
 
         content_bytes = resp.content
-        tex_content = None
 
-        # Try tar.gz first
+        # Try tar.gz, plain tar, gzip, plain — collect ALL .tex files in tar cases.
+        tar = self._open_archive(content_bytes)
+        if tar is not None:
+            try:
+                main, files = self._read_all_tex_from_tar(tar)
+                if main is None:
+                    raise SourceUnavailable(
+                        f"No .tex with \\begin{{document}} in archive for {arxiv_id}"
+                    )
+                return self._expand_includes(main, files)
+            finally:
+                tar.close()
+
+        # Single-file fallbacks: gzip or plain text. No includes possible.
         try:
-            tar = tarfile.open(fileobj=io.BytesIO(content_bytes), mode="r:gz")
-            tex_content = self._find_main_tex_in_tar(tar)
-        except (tarfile.TarError, EOFError):
+            text = gzip.decompress(content_bytes).decode("utf-8", errors="ignore")
+            if "\\begin{document}" in text:
+                return text
+        except (gzip.BadGzipFile, OSError):
             pass
 
-        # Try plain tar
-        if tex_content is None:
+        try:
+            text = content_bytes.decode("utf-8", errors="ignore")
+            if "\\begin{document}" in text:
+                return text
+        except UnicodeDecodeError:
+            pass
+
+        raise SourceUnavailable(
+            f"Cannot extract .tex from arXiv source for {arxiv_id}"
+        )
+
+    def _open_archive(self, content_bytes: bytes) -> tarfile.TarFile | None:
+        """Try opening as tar.gz, then plain tar. Returns None if neither."""
+        for mode in ("r:gz", "r:"):
             try:
-                tar = tarfile.open(fileobj=io.BytesIO(content_bytes), mode="r:")
-                tex_content = self._find_main_tex_in_tar(tar)
+                return tarfile.open(fileobj=io.BytesIO(content_bytes), mode=mode)
             except (tarfile.TarError, EOFError):
-                pass
-
-        # Try single gzipped file
-        if tex_content is None:
-            try:
-                tex_content = gzip.decompress(content_bytes).decode(
-                    "utf-8", errors="ignore"
-                )
-            except (gzip.BadGzipFile, OSError):
-                pass
-
-        # Try plain text
-        if tex_content is None:
-            try:
-                tex_content = content_bytes.decode("utf-8", errors="ignore")
-                if "\\begin{document}" not in tex_content:
-                    tex_content = None
-            except UnicodeDecodeError:
-                pass
-
-        if tex_content is None:
-            raise SourceUnavailable(
-                f"Cannot extract .tex from arXiv source for {arxiv_id}"
-            )
-
-        return tex_content
-
-    def _find_main_tex_in_tar(self, tar: tarfile.TarFile) -> str | None:
-        """Find the main .tex file (the one containing \\begin{document})."""
-        tex_files = [f for f in tar.getnames() if f.endswith(".tex")]
-
-        if not tex_files:
-            return None
-
-        # Strategy: find the .tex file that contains \begin{document}
-        for tf in tex_files:
-            try:
-                content = (
-                    tar.extractfile(tf).read().decode("utf-8", errors="ignore")
-                )
-                if "\\begin{document}" in content:
-                    return content
-            except (KeyError, AttributeError):
                 continue
+        return None
 
-        # Fallback: return the largest .tex file
-        largest = max(tex_files, key=lambda f: tar.getmember(f).size)
-        return tar.extractfile(largest).read().decode("utf-8", errors="ignore")
+    # Filename keywords that suggest a non-paper supplementary document
+    # (rebuttals, response letters, cover letters). These are deprioritized
+    # when picking the main .tex among multiple candidates with \begin{document}.
+    _NON_PAPER_FILENAME_HINTS = (
+        "rebuttal", "response", "cover", "cover_letter", "coverletter",
+        "supplement", "supplementary", "supp_", "reply",
+    )
+
+    def _read_all_tex_from_tar(
+        self, tar: tarfile.TarFile
+    ) -> tuple[str | None, dict[str, str]]:
+        """Extract every .tex file. Return (main_content, all_files_by_relpath).
+
+        Main-file selection (when multiple .tex have `\\begin{document}`):
+          1. Filter out files whose names look like supplementary docs
+             (rebuttal, response, cover_letter, supplement, ...).
+          2. Score remaining by signals of "real paper":
+             - has `\\title{}`               +50
+             - count of `\\input{...}`/`\\include{...}` inside    +5 each
+             - file size as final tie-breaker (smaller for typical main)
+          3. Highest score wins.
+
+        Without scoring, the previous "pick largest" heuristic mis-picked
+        rebuttal letters when they happened to be longer than the paper
+        (observed: OpenScene 2211.15654 archive has both arxiv.tex and
+        rebuttal.tex, rebuttal is larger but contains no \\section commands).
+        """
+        files: dict[str, str] = {}
+        candidates: list[tuple[str, str, int]] = []  # (name, content, size)
+
+        for member in tar.getmembers():
+            if not member.isfile() or not member.name.endswith(".tex"):
+                continue
+            try:
+                f = tar.extractfile(member)
+                if f is None:
+                    continue
+                text = f.read().decode("utf-8", errors="ignore")
+            except (KeyError, AttributeError, tarfile.TarError):
+                continue
+            files[member.name] = text
+            if "\\begin{document}" in text:
+                candidates.append((member.name, text, member.size))
+
+        if not candidates:
+            return None, files
+
+        # Filter out supplementary-looking filenames first; if that empties
+        # the list, fall back to the unfiltered set.
+        def looks_supplementary(name: str) -> bool:
+            base = name.lower()
+            return any(hint in base for hint in self._NON_PAPER_FILENAME_HINTS)
+
+        non_supp = [c for c in candidates if not looks_supplementary(c[0])]
+        pool = non_supp if non_supp else candidates
+
+        def score(item: tuple[str, str, int]) -> tuple[int, int]:
+            name, text, size = item
+            s = 0
+            if "\\title{" in text:
+                s += 50
+            s += 5 * len(re.findall(r"\\(?:input|include|subfile)\b", text))
+            # Tie-breaker: prefer smaller (typical main-only file is small;
+            # large file is more likely a self-contained doc that may not be
+            # the real paper). Use negative size so larger size = lower secondary.
+            return (s, -size)
+
+        pool.sort(key=score, reverse=True)
+        main_name = pool[0][0]
+        return files[main_name], files
+
+    def _expand_includes(
+        self, text: str, files: dict[str, str], depth: int = 0,
+        visited: set[str] | None = None,
+    ) -> str:
+        """Recursively inline `\\input{...}` and `\\include{...}` references.
+
+        Args:
+            text: LaTeX source to expand.
+            files: map of {relative_path: content}, scoped to project root.
+            depth: recursion depth (defensive against pathological cycles).
+            visited: set of already-expanded file paths in the current chain.
+
+        Missing includes are left as-is (not raised) — the parser will simply
+        not find sections in them, which is recoverable.
+        """
+        if depth > _MAX_INPUT_DEPTH:
+            logger.warning("Max include depth %d exceeded", _MAX_INPUT_DEPTH)
+            return text
+
+        if visited is None:
+            visited = set()
+
+        # Strip comments first so commented-out \input lines don't get expanded.
+        # Done on a working copy; we don't return the comment-stripped form
+        # (other parsing wants comments stripped too, but that's done later
+        # inside clean_latex/section parsing).
+        stripped = _COMMENT_RE.sub("", text)
+
+        def repl(match: re.Match) -> str:
+            ref = match.group(1).strip()
+            target = self._resolve_include(ref, files)
+            if target is None:
+                logger.debug("Cannot resolve \\input{%s} (not in archive)", ref)
+                return match.group(0)  # leave as-is
+            if target in visited:
+                logger.warning("Circular include detected: %s", target)
+                return ""  # break the cycle
+            sub = files[target]
+            new_visited = visited | {target}
+            return self._expand_includes(sub, files, depth + 1, new_visited)
+
+        return _INCLUDE_RE.sub(repl, stripped)
+
+    @staticmethod
+    def _resolve_include(ref: str, files: dict[str, str]) -> str | None:
+        """Resolve a `\\input{ref}` argument to a key in `files`.
+
+        LaTeX's `\\input{x}` resolution tries `x` and `x.tex`. We additionally
+        normalize away `./` prefixes and trailing slashes.
+        """
+        cleaned = ref.lstrip("./").rstrip("/")
+        candidates = [cleaned, cleaned + ".tex"]
+
+        # Direct hit
+        for c in candidates:
+            if c in files:
+                return c
+
+        # Match by basename or suffix (handles cases where main file is in
+        # subdir and \input is relative to that subdir, e.g. main in src/main.tex
+        # and \input{intro} → src/intro.tex).
+        for c in candidates:
+            for key in files:
+                if key.endswith("/" + c) or key == c:
+                    return key
+
+        return None
+
+    # ── Section parsing ─────────────────────────────────────────────────
 
     def _parse_sections(self, tex_content: str) -> list[Section]:
         """Parse section structure from LaTeX content."""
