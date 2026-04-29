@@ -25,6 +25,13 @@ from .splitter import (
     BaseSplitter,
     SourceUnavailable,
 )
+from .chunker import (
+    Chunk,
+    chunk_section,
+    chunk_sections,
+    chunk_text,
+    TARGET_CHARS,
+)
 
 __all__ = [
     "PaperSplitter",
@@ -34,4 +41,9 @@ __all__ = [
     "SplitMethod",
     "BaseSplitter",
     "SourceUnavailable",
+    "Chunk",
+    "chunk_section",
+    "chunk_sections",
+    "chunk_text",
+    "TARGET_CHARS",
 ]

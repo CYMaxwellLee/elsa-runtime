@@ -37,6 +37,7 @@ from pathlib import Path
 import yaml
 
 from elsa_runtime.paper import PaperSplitter, SourceUnavailable
+from elsa_runtime.paper.chunker import TARGET_CHARS, chunk_sections
 from elsa_runtime.storage.lancedb_store import LanceDBStore
 
 logging.basicConfig(
@@ -218,14 +219,25 @@ async def ingest_paper(
     if store is None:
         raise RuntimeError("Store not connected; cannot ingest in non-dry-run mode")
 
+    # Chunk sections so no single embedding input exceeds BGE-M3's safe limit.
+    # Without this, sections > ~6000 chars caused "Invalid buffer size: NN GiB"
+    # MPS errors on M1 (verified 2026-04-29 ingest).
+    chunks = chunk_sections(sections, target_chars=TARGET_CHARS)
+    logger.info(
+        "  Chunked: %d sections -> %d chunks (max %d chars each)",
+        len(sections), len(chunks), TARGET_CHARS,
+    )
+
     ids = []
     documents = []
     metadatas = []
 
-    for section in sections:
-        doc_id = f"{paper_id}::{section.id}"
+    for ch in chunks:
+        # Deterministic ID: <arxiv_id>::<section_id>::chunk:<idx>
+        # Single-chunk sections still get the chunk:0 suffix for consistency.
+        doc_id = f"{paper_id}::{ch.section_id}::chunk:{ch.chunk_idx}"
         ids.append(doc_id)
-        documents.append(section.content)
+        documents.append(ch.content)
         metadatas.append(
             {
                 "arxiv_id": paper_id,
