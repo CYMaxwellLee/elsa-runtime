@@ -27,11 +27,16 @@ GMAIL_DIR = Path.home() / ".elsa-system" / "gmail"
 CREDENTIALS_FILE = GMAIL_DIR / "credentials.json"
 TOKEN_FILE = GMAIL_DIR / "token.json"
 # 2026-04-28: added `gmail.compose` for create_draft_reply (threadId-aware
-# draft creation that the Anthropic-managed connector lacks). This scope
-# technically allows send too, but our code never exposes a send path.
+# draft creation that the Anthropic-managed connector lacks).
+# 2026-04-29: added `documents` (read+write Google Docs, gated as Tier A
+# at MCP layer per C25-DESTRUCTIVE-OPS-PROTOCOL) + `drive.readonly`
+# (search + list Drive items, no writes).
+# Token shared at ~/.elsa-system/gmail/token.json — same Google account.
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive.readonly",
 ]
 DEFAULT_MAX_RESULTS = 10
 

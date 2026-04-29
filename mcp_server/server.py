@@ -631,6 +631,374 @@ async def create_draft_reply(
         )
 
 
+# ── Tool 9: gmail_list_attachments / gmail_download_attachment ──
+
+# Lazy Gmail read-only client. Shares the same token file as the composer.
+_gmail_client = None
+
+
+def _get_gmail_client():
+    global _gmail_client
+    if _gmail_client is not None:
+        return _gmail_client
+    from elsa_runtime.tools.gmail.auth import get_service
+    from elsa_runtime.tools.gmail.client import GmailClient
+
+    gmail_dir = Path.home() / ".elsa-system" / "gmail"
+    scopes = [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ]
+    service = get_service(gmail_dir / "credentials.json", gmail_dir / "token.json", scopes)
+    _gmail_client = GmailClient(service)
+    return _gmail_client
+
+
+# Default attachment save location: per-message subdir under elsa-data/temp.
+# elsa-data is gitignored so attachments stay local. Per-msg subdir avoids
+# filename collisions across senders.
+DEFAULT_ATTACHMENT_DIR = (
+    Path.home() / "Projects/elsa-data/temp/attachments"
+)
+
+
+@mcp.tool()
+async def gmail_list_attachments(message_id: str) -> str:
+    """List attachments on a Gmail message.
+
+    Read-only: returns metadata only (filename, mime type, size, attachment_id).
+    Use the returned attachment_id with gmail_download_attachment to fetch.
+
+    Args:
+        message_id: Gmail message ID.
+
+    Returns:
+        JSON with operation status and attachments list.
+    """
+    try:
+        client = _get_gmail_client()
+        atts = client.list_attachments(message_id)
+        return json.dumps(
+            {
+                "operation": "OK",
+                "message_id": message_id,
+                "attachment_count": len(atts),
+                "attachments": atts,
+            },
+            ensure_ascii=False,
+        )
+    except FileNotFoundError as e:
+        return json.dumps(
+            {
+                "operation": "AUTH_REQUIRED",
+                "error": str(e),
+                "hint": (
+                    "Run: python3 ~/Projects/elsa-runtime/src/elsa_runtime/"
+                    "tools/gmail/gmail_tool.py auth"
+                ),
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps(
+            {"operation": "ERROR", "error": str(e)},
+            ensure_ascii=False,
+        )
+
+
+@mcp.tool()
+async def gmail_download_attachment(
+    message_id: str,
+    attachment_id: str,
+    filename: str,
+    save_dir: str = "",
+) -> str:
+    """Download a Gmail attachment to local disk.
+
+    Saves under save_dir/<message_id>/<filename>. Default save_dir is
+    ~/Projects/elsa-data/temp/attachments/ (gitignored, local-only).
+
+    Returns the absolute local path. Tell the user the path and wait for
+    further instructions — do not auto-process the file.
+
+    Args:
+        message_id: Gmail message ID.
+        attachment_id: Attachment ID from gmail_list_attachments.
+        filename: Save with this basename. Caller should use the filename
+            from list_attachments to preserve the original name.
+        save_dir: Optional. Defaults to ~/Projects/elsa-data/temp/attachments/.
+    """
+    try:
+        client = _get_gmail_client()
+        base = Path(save_dir).expanduser() if save_dir else DEFAULT_ATTACHMENT_DIR
+        per_msg = base / message_id
+        path = client.download_attachment(
+            message_id=message_id,
+            attachment_id=attachment_id,
+            save_dir=per_msg,
+            filename=filename,
+        )
+        size = path.stat().st_size
+        return json.dumps(
+            {
+                "operation": "DOWNLOADED",
+                "message_id": message_id,
+                "filename": filename,
+                "saved_to": str(path),
+                "size_bytes": size,
+            },
+            ensure_ascii=False,
+        )
+    except FileNotFoundError as e:
+        return json.dumps(
+            {
+                "operation": "AUTH_REQUIRED",
+                "error": str(e),
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps(
+            {"operation": "ERROR", "error": str(e)},
+            ensure_ascii=False,
+        )
+
+
+# ── Tool 10-13: Google Docs / Drive ──
+
+_gdocs_reader = None
+_gdocs_composer = None
+_gdrive_reader = None
+
+
+def _get_gdocs_services():
+    """Lazy-init Google Docs + Drive services. Returns (docs_svc, drive_svc).
+    Both share the same OAuth token as Gmail (same account, single token file).
+    """
+    from elsa_runtime.tools.gmail.auth import get_credentials
+    from googleapiclient.discovery import build
+
+    gmail_dir = Path.home() / ".elsa-system" / "gmail"
+    scopes = [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ]
+    creds = get_credentials(
+        gmail_dir / "credentials.json", gmail_dir / "token.json", scopes
+    )
+    docs_svc = build("docs", "v1", credentials=creds)
+    drive_svc = build("drive", "v3", credentials=creds)
+    return docs_svc, drive_svc
+
+
+def _get_gdocs_reader():
+    global _gdocs_reader
+    if _gdocs_reader is None:
+        from elsa_runtime.tools.gdocs.reader import GoogleDocsReader
+
+        docs_svc, _ = _get_gdocs_services()
+        _gdocs_reader = GoogleDocsReader(docs_svc)
+    return _gdocs_reader
+
+
+def _get_gdocs_composer():
+    global _gdocs_composer
+    if _gdocs_composer is None:
+        from elsa_runtime.tools.gdocs.composer import GoogleDocsComposer
+
+        docs_svc, _ = _get_gdocs_services()
+        _gdocs_composer = GoogleDocsComposer(docs_svc)
+    return _gdocs_composer
+
+
+def _get_gdrive_reader():
+    global _gdrive_reader
+    if _gdrive_reader is None:
+        from elsa_runtime.tools.gdocs.reader import GoogleDriveReader
+
+        _, drive_svc = _get_gdocs_services()
+        _gdrive_reader = GoogleDriveReader(drive_svc)
+    return _gdrive_reader
+
+
+@mcp.tool()
+async def gdoc_read(document_id: str) -> str:
+    """Read a Google Doc. Returns title, plain text, headings, char count.
+
+    Read-only operation (no permission prompt).
+
+    Args:
+        document_id: Google Doc ID (the path component after /document/d/).
+
+    Returns:
+        JSON with title, text, headings, etc.
+    """
+    try:
+        reader = _get_gdocs_reader()
+        doc = reader.read(document_id)
+        return json.dumps({"operation": "OK", "doc": doc}, ensure_ascii=False)
+    except FileNotFoundError as e:
+        return json.dumps(
+            {"operation": "AUTH_REQUIRED", "error": str(e)},
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps(
+            {"operation": "ERROR", "error": str(e)},
+            ensure_ascii=False,
+        )
+
+
+@mcp.tool()
+async def gdrive_search(
+    query: str = "",
+    max_results: int = 20,
+    mime_type: str = "",
+) -> str:
+    """Search Google Drive for files.
+
+    Read-only.
+
+    Args:
+        query: Drive query syntax (e.g. "name contains 'NSTC'"). Empty for all.
+        max_results: max items, capped at 100.
+        mime_type: shortcut filter — 'doc', 'sheet', 'slide', 'pdf', 'folder',
+            or full MIME type. Empty for any.
+
+    Returns:
+        JSON list of {id, name, mime_type, modified, owners, url, ...}.
+    """
+    try:
+        reader = _get_gdrive_reader()
+        items = reader.search(
+            query=query,
+            max_results=max_results,
+            mime_type=mime_type or None,
+        )
+        return json.dumps(
+            {"operation": "OK", "count": len(items), "items": items},
+            ensure_ascii=False,
+        )
+    except FileNotFoundError as e:
+        return json.dumps(
+            {"operation": "AUTH_REQUIRED", "error": str(e)},
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps(
+            {"operation": "ERROR", "error": str(e)},
+            ensure_ascii=False,
+        )
+
+
+@mcp.tool()
+async def gdoc_append_text(
+    document_id: str,
+    text: str,
+    with_newline: bool = True,
+) -> str:
+    """Append plain text to the end of a Google Doc.
+
+    ⚠️ WRITE OPERATION — Tier A under C25-DESTRUCTIVE-OPS-PROTOCOL.
+    Workspace settings.json must put this in `permissions.ask` so user
+    confirms each invocation via Telegram permission prompt.
+
+    Args:
+        document_id: Google Doc ID.
+        text: Plain text to append.
+        with_newline: If true (default), prepend "\\n" so appended text
+            starts on its own line.
+
+    Returns:
+        JSON with operation status and revision_id.
+    """
+    try:
+        composer = _get_gdocs_composer()
+        result = composer.append_text(
+            document_id=document_id,
+            text=text,
+            with_newline=with_newline,
+        )
+        return json.dumps(
+            {
+                "operation": "APPENDED",
+                "document_id": document_id,
+                "revision_id": result.get("documentId"),
+                "chars_appended": len(text),
+            },
+            ensure_ascii=False,
+        )
+    except FileNotFoundError as e:
+        return json.dumps(
+            {"operation": "AUTH_REQUIRED", "error": str(e)},
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps(
+            {"operation": "ERROR", "error": str(e)},
+            ensure_ascii=False,
+        )
+
+
+@mcp.tool()
+async def gdoc_replace_text(
+    document_id: str,
+    find_text: str,
+    replace_with: str,
+    match_case: bool = True,
+) -> str:
+    """Find-and-replace all occurrences of `find_text` in a Google Doc.
+
+    ⚠️ WRITE OPERATION — Tier A. Find-and-replace is hard to undo without
+    a manual restore. Settings.json gates this in `permissions.ask`.
+
+    Args:
+        document_id: Google Doc ID.
+        find_text: Exact text to search for.
+        replace_with: New text.
+        match_case: If true, case-sensitive match.
+
+    Returns:
+        JSON with replacement count.
+    """
+    try:
+        composer = _get_gdocs_composer()
+        result = composer.replace_text(
+            document_id=document_id,
+            find_text=find_text,
+            replace_with=replace_with,
+            match_case=match_case,
+        )
+        replies = result.get("replies", [{}])
+        n_replaced = (
+            replies[0].get("replaceAllText", {}).get("occurrencesChanged", 0)
+            if replies
+            else 0
+        )
+        return json.dumps(
+            {
+                "operation": "REPLACED",
+                "document_id": document_id,
+                "occurrences_changed": n_replaced,
+            },
+            ensure_ascii=False,
+        )
+    except FileNotFoundError as e:
+        return json.dumps(
+            {"operation": "AUTH_REQUIRED", "error": str(e)},
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps(
+            {"operation": "ERROR", "error": str(e)},
+            ensure_ascii=False,
+        )
+
+
 # ── Entry point ──
 
 def main():
