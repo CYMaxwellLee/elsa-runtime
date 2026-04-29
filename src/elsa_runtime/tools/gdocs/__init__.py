@@ -15,5 +15,12 @@ Token shared with Gmail tool: ~/.elsa-system/gmail/token.json
 
 from .reader import GoogleDocsReader, GoogleDriveReader
 from .composer import GoogleDocsComposer
+from .universal import UniversalDocReader, DEFAULT_TEMP_DIR
 
-__all__ = ["GoogleDocsReader", "GoogleDriveReader", "GoogleDocsComposer"]
+__all__ = [
+    "GoogleDocsReader",
+    "GoogleDriveReader",
+    "GoogleDocsComposer",
+    "UniversalDocReader",
+    "DEFAULT_TEMP_DIR",
+]

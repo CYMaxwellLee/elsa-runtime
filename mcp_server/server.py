@@ -771,6 +771,7 @@ async def gmail_download_attachment(
 _gdocs_reader = None
 _gdocs_composer = None
 _gdrive_reader = None
+_universal_doc_reader = None
 
 
 def _get_gdocs_services():
@@ -825,6 +826,16 @@ def _get_gdrive_reader():
     return _gdrive_reader
 
 
+def _get_universal_doc_reader():
+    global _universal_doc_reader
+    if _universal_doc_reader is None:
+        from elsa_runtime.tools.gdocs.universal import UniversalDocReader
+
+        docs_svc, drive_svc = _get_gdocs_services()
+        _universal_doc_reader = UniversalDocReader(drive_svc, docs_svc)
+    return _universal_doc_reader
+
+
 @mcp.tool()
 async def gdoc_read(document_id: str) -> str:
     """Read a Google Doc. Returns title, plain text, headings, char count.
@@ -840,6 +851,43 @@ async def gdoc_read(document_id: str) -> str:
     try:
         reader = _get_gdocs_reader()
         doc = reader.read(document_id)
+        return json.dumps({"operation": "OK", "doc": doc}, ensure_ascii=False)
+    except FileNotFoundError as e:
+        return json.dumps(
+            {"operation": "AUTH_REQUIRED", "error": str(e)},
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps(
+            {"operation": "ERROR", "error": str(e)},
+            ensure_ascii=False,
+        )
+
+
+@mcp.tool()
+async def gdoc_read_universal(file_id: str) -> str:
+    """Read any Drive document (native Google Doc, .docx, .pdf, .txt, .md).
+
+    Routes by MIME type:
+      - native Google Doc → Docs API (no local file)
+      - .docx / .doc → download + python-docx parse
+      - .pdf → download + pymupdf parse
+      - text/* → download + utf-8 decode
+      - other → download blob, return path for manual handling
+
+    Non-native blobs are saved to ~/Projects/elsa-data/temp/gdocs/<file_id>/.
+    Read-only operation (no permission prompt).
+
+    Args:
+        file_id: Drive file ID.
+
+    Returns:
+        JSON with id, name, mime_type, method, text, headings, char_count,
+        saved_to (local path for non-native types, null for native Docs).
+    """
+    try:
+        reader = _get_universal_doc_reader()
+        doc = reader.read(file_id)
         return json.dumps({"operation": "OK", "doc": doc}, ensure_ascii=False)
     except FileNotFoundError as e:
         return json.dumps(
