@@ -171,3 +171,44 @@ def chunk_sections(sections: list[Section], target_chars: int = TARGET_CHARS) ->
     for s in sections:
         out.extend(chunk_section(s, target_chars=target_chars))
     return out
+
+
+# Patterns indicating a chunk that has no real content — most commonly
+# an end-of-paper figure dump where the splitter / latex_cleaner stripped
+# captions but left structural [FIGURE] placeholders. Embedding these
+# pollutes retrieval (they contribute nothing semantic).
+_GARBAGE_TOKEN_RE = re.compile(r"\[(?:FIGURE|TABLE|EQUATION|ALGORITHM)\]")
+_MIN_SIGNAL_CHARS = 30  # below this we treat the chunk as noise
+
+
+def is_garbage_chunk(text: str) -> bool:
+    """True if a chunk has no embedding-worthy content.
+
+    Empty / whitespace-only chunks are obvious. The harder case is chunks
+    consisting only of [FIGURE] / [TABLE] / [EQUATION] / [ALGORITHM]
+    placeholders left behind by the LaTeX cleaner. Strip those tokens
+    (and surrounding whitespace) and check whether anything substantive
+    remains.
+
+    Threshold: >= 30 non-placeholder characters survive. Below that the
+    chunk is almost certainly figure-caption residue or stray markup.
+    """
+    if not text:
+        return True
+    stripped = _GARBAGE_TOKEN_RE.sub("", text).strip()
+    return len(stripped) < _MIN_SIGNAL_CHARS
+
+
+def filter_garbage_chunks(chunks: list[Chunk]) -> tuple[list[Chunk], int]:
+    """Drop chunks whose content is empty / placeholder-only.
+
+    Returns (kept, n_dropped). Logging is the caller's job.
+    """
+    kept: list[Chunk] = []
+    dropped = 0
+    for ch in chunks:
+        if is_garbage_chunk(ch.content):
+            dropped += 1
+            continue
+        kept.append(ch)
+    return kept, dropped

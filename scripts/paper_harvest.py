@@ -37,7 +37,12 @@ from pathlib import Path
 import yaml
 
 from elsa_runtime.paper import PaperSplitter, SourceUnavailable
-from elsa_runtime.paper.chunker import TARGET_CHARS, chunk_sections
+from elsa_runtime.paper.arxiv_meta import fetch_arxiv_metadata
+from elsa_runtime.paper.chunker import (
+    TARGET_CHARS,
+    chunk_sections,
+    filter_garbage_chunks,
+)
 from elsa_runtime.storage.lancedb_store import LanceDBStore
 
 logging.basicConfig(
@@ -223,10 +228,31 @@ async def ingest_paper(
     # Without this, sections > ~6000 chars caused "Invalid buffer size: NN GiB"
     # MPS errors on M1 (verified 2026-04-29 ingest).
     chunks = chunk_sections(sections, target_chars=TARGET_CHARS)
+
+    # Filter out figure-only / empty chunks. Without this, the harvest
+    # writes ~6% phantom rows (verified 4/30 audit: 74 / 1252 chunks were
+    # garbage like "[FIGURE]\n[FIGURE]\n..."). Phantom rows still get
+    # embedded, then pollute retrieval downstream.
+    chunks, n_dropped = filter_garbage_chunks(chunks)
     logger.info(
-        "  Chunked: %d sections -> %d chunks (max %d chars each)",
-        len(sections), len(chunks), TARGET_CHARS,
+        "  Chunked: %d sections -> %d chunks (max %d chars each)%s",
+        len(sections),
+        len(chunks),
+        TARGET_CHARS,
+        f" [dropped {n_dropped} garbage]" if n_dropped else "",
     )
+
+    # Fetch authors / venue / year from arXiv API. One network call per
+    # paper, cached in-process. Failures degrade to empty strings (the
+    # harvest still completes; metadata can be backfilled later).
+    arxiv_meta = fetch_arxiv_metadata(paper_id) if paper_id else None
+    if arxiv_meta:
+        logger.info(
+            "  arXiv meta: year=%d, authors=%d names, venue=%r",
+            arxiv_meta.year,
+            len([a for a in arxiv_meta.authors.split(",") if a.strip()]),
+            arxiv_meta.venue or "(none)",
+        )
 
     ids = []
     documents = []
@@ -238,13 +264,20 @@ async def ingest_paper(
         doc_id = f"{paper_id}::{ch.section_id}::chunk:{ch.chunk_idx}"
         ids.append(doc_id)
         documents.append(ch.content)
-        metadatas.append(
-            {
-                "arxiv_id": paper_id,
-                "tier": tier,
-                "domain": domain,
-            }
-        )
+        meta_row = {
+            "arxiv_id": paper_id,
+            "tier": tier,
+            "domain": domain,
+        }
+        if arxiv_meta:
+            # Only set when fetched successfully — empty strings are still
+            # better than the previous pure-default behaviour because
+            # downstream filters can distinguish "API confirmed empty" from
+            # "never fetched", but for now we just write what we have.
+            meta_row["year"] = arxiv_meta.year
+            meta_row["authors"] = arxiv_meta.authors
+            meta_row["venue"] = arxiv_meta.venue
+        metadatas.append(meta_row)
 
     total_added = 0
     for start in range(0, len(ids), batch_size):

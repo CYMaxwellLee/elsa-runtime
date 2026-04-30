@@ -6,6 +6,8 @@ from elsa_runtime.paper.chunker import (
     chunk_section,
     chunk_sections,
     chunk_text,
+    filter_garbage_chunks,
+    is_garbage_chunk,
 )
 from elsa_runtime.paper.splitter import Section
 
@@ -172,3 +174,86 @@ class TestTargetCharsSafe:
         assert max_tokens_estimate < 8192 * 0.25, (
             f"TARGET_CHARS={TARGET_CHARS} too aggressive for attention budget"
         )
+
+
+# ── Garbage chunk filter ────────────────────────────────────────────────
+
+
+class TestIsGarbageChunk:
+    def test_empty_string_is_garbage(self):
+        assert is_garbage_chunk("")
+
+    def test_whitespace_only_is_garbage(self):
+        assert is_garbage_chunk("   \n\n  \t ")
+
+    def test_figure_only_is_garbage(self):
+        # Real example from 4/30 audit: D3PM last chunk
+        assert is_garbage_chunk("[FIGURE]\n\n[FIGURE]\n\n[FIGURE]\n\n[FIGURE]")
+
+    def test_table_only_is_garbage(self):
+        assert is_garbage_chunk("[TABLE]\n[TABLE]\n[TABLE]")
+
+    def test_mixed_placeholders_only_is_garbage(self):
+        assert is_garbage_chunk(
+            "[FIGURE]\n[TABLE]\n[EQUATION]\n[ALGORITHM]\n[FIGURE]"
+        )
+
+    def test_real_content_passes(self):
+        text = (
+            "We propose a new method for diffusion modeling on discrete state "
+            "spaces. The approach generalizes prior work in the categorical "
+            "domain by introducing a transition matrix that admits multiple "
+            "noise schedules."
+        )
+        assert not is_garbage_chunk(text)
+
+    def test_short_caption_passes_if_substantive(self):
+        # Even short body text >= 30 chars after strip should pass
+        text = "Following Austin et al we set the parameters as follows."
+        assert not is_garbage_chunk(text)
+
+    def test_figure_with_real_caption_passes(self):
+        text = (
+            "[FIGURE] As shown above, the variational lower bound improves "
+            "monotonically with the number of denoising steps."
+        )
+        assert not is_garbage_chunk(text)
+
+
+class TestFilterGarbageChunks:
+    def _ch(self, content: str, idx: int = 0) -> Chunk:
+        return Chunk(
+            section_id="section:Method",
+            section_title="Method",
+            section_level=1,
+            section_order=0,
+            chunk_idx=idx,
+            chunk_total=1,
+            content=content,
+            estimated_tokens=len(content) // 4,
+            metadata={},
+        )
+
+    def test_drops_garbage_keeps_real(self):
+        chunks = [
+            self._ch("Real text with sufficient length to be meaningful content here.", 0),
+            self._ch("[FIGURE]\n[FIGURE]", 1),
+            self._ch("More substantive method explanation in this chunk overall.", 2),
+            self._ch("", 3),
+            self._ch("[TABLE]\n[TABLE]\n[TABLE]", 4),
+        ]
+        kept, dropped = filter_garbage_chunks(chunks)
+        assert dropped == 3
+        assert len(kept) == 2
+        assert all("Real" in k.content or "substantive" in k.content for k in kept)
+
+    def test_empty_input(self):
+        kept, dropped = filter_garbage_chunks([])
+        assert kept == []
+        assert dropped == 0
+
+    def test_all_garbage_returns_empty(self):
+        chunks = [self._ch("[FIGURE]", 0), self._ch("", 1)]
+        kept, dropped = filter_garbage_chunks(chunks)
+        assert kept == []
+        assert dropped == 2
