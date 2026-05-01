@@ -153,3 +153,93 @@ class TestFetchArxivMetadata:
     def test_empty_id_returns_zeroed(self):
         meta = fetch_arxiv_metadata("")
         assert meta == ArxivMetadata("", 0, "", "", "")
+
+
+# ── Rate-limit hardening (regression tests for 2026-05-01 cluster-failure) ──
+
+
+class TestRateLimitHardening:
+    def test_429_triggers_long_cooldown_then_retry_succeeds(self, monkeypatch):
+        """HTTP 429 on first attempt should trigger long cooldown then retry."""
+        body = _atom_response(authors=["Author A"])
+
+        # Mock urlopen: first call raises 429, second call returns success.
+        from urllib.error import HTTPError
+        responses = [
+            HTTPError("url", 429, "Too Many Requests", {}, None),
+            _FakeResponse(body),
+        ]
+        call_count = [0]
+
+        def fake_urlopen(*args, **kwargs):
+            r = responses[call_count[0]]
+            call_count[0] += 1
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        sleeps: list[float] = []
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        monkeypatch.setattr(
+            "time.sleep", lambda s: sleeps.append(s)
+        )
+
+        meta = fetch_arxiv_metadata(
+            "2107.03006", retries=2, rate_limit_cooldown=30.0
+        )
+        assert meta.authors == "Author A"
+        # We slept >= 30s as part of 429 handling
+        assert any(s >= 30.0 for s in sleeps), (
+            f"Expected a >=30s sleep after 429, got sleeps={sleeps}"
+        )
+
+    def test_polite_wait_enforces_min_gap(self, monkeypatch):
+        """Two consecutive successful fetches should be separated by >= 1s."""
+        body = _atom_response(authors=["A"])
+        monkeypatch.setattr(
+            "urllib.request.urlopen", lambda *a, **k: _FakeResponse(body)
+        )
+
+        sleeps: list[float] = []
+        monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+
+        # Fake clock that increments 0.1s per monotonic() call so polite_wait
+        # sees barely-any-elapsed-time after the first request.
+        clock = [0.0]
+        def fake_mono():
+            clock[0] += 0.1
+            return clock[0]
+        monkeypatch.setattr("time.monotonic", fake_mono)
+
+        clear_cache()
+        fetch_arxiv_metadata("2107.03006")
+        fetch_arxiv_metadata("2503.04482")  # different paper to bypass cache
+        # Some sleep must reflect polite-wait (< 1s blocked, sleeping the rest)
+        assert any(0 < s <= 1.0 for s in sleeps), (
+            f"Expected a sub-second polite-wait sleep, got sleeps={sleeps}"
+        )
+
+    def test_non_429_uses_normal_backoff(self, monkeypatch):
+        """Network timeout (not 429) should NOT trigger 30s cooldown."""
+        # All attempts time out
+        from socket import timeout as TimeoutError_
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            lambda *a, **k: (_ for _ in ()).throw(TimeoutError_("timed out")),
+        )
+
+        sleeps: list[float] = []
+        monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+
+        meta = fetch_arxiv_metadata(
+            "2107.03006",
+            retries=2,
+            retry_backoff=2.0,
+            rate_limit_cooldown=30.0,
+        )
+        # Returned shell metadata
+        assert meta.authors == ""
+        # No 30s sleep — only normal backoff (1.0, 2.0)
+        assert all(s < 10.0 for s in sleeps), (
+            f"Non-429 should use short backoff, got sleeps={sleeps}"
+        )

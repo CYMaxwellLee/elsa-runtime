@@ -76,19 +76,49 @@ class ArxivMetadata:
 # and we don't want to repeat the network call.
 _cache: dict[str, ArxivMetadata] = {}
 
+# Track the timestamp of the last *successful* HTTP request so we can
+# enforce a minimum inter-request gap. arXiv ToS recommends >= 3s between
+# requests; we use a smaller floor since we don't burst, and rely on 429
+# detection for adaptive backoff.
+_last_request_ts: float = 0.0
+_MIN_INTER_REQUEST_S = 1.0
+
+
+def _polite_wait() -> None:
+    """Block until at least _MIN_INTER_REQUEST_S has elapsed since the last
+    request. Idempotent across calls in the same process."""
+    global _last_request_ts
+    elapsed = time.monotonic() - _last_request_ts
+    if elapsed < _MIN_INTER_REQUEST_S:
+        time.sleep(_MIN_INTER_REQUEST_S - elapsed)
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    """True if the exception indicates the server rate-limited us (HTTP 429)."""
+    code = getattr(exc, "code", None)
+    return code == 429
+
 
 def fetch_arxiv_metadata(
     arxiv_id: str,
     *,
-    timeout: float = 10.0,
-    retries: int = 2,
-    retry_backoff: float = 1.5,
+    timeout: float = 20.0,
+    retries: int = 3,
+    retry_backoff: float = 2.0,
+    rate_limit_cooldown: float = 30.0,
 ) -> ArxivMetadata:
     """Fetch authors / venue / title from arXiv export API.
 
     Idempotent: caches by arxiv_id within the process. Network failures
     degrade to a metadata object with empty author/venue/title and the
     derived year, rather than raising.
+
+    Rate-limit-aware: inserts >= _MIN_INTER_REQUEST_S between calls and
+    treats HTTP 429 with a longer cooldown (rate_limit_cooldown sec)
+    before retrying. This addresses the cluster-failure pattern observed
+    on 2026-04-30 → 2026-05-01 launchd run where 9 papers in a 6-minute
+    window all failed with timeout / 429 because too many back-to-back
+    requests were sent.
     """
     if not arxiv_id:
         return ArxivMetadata("", 0, "", "", "")
@@ -103,20 +133,34 @@ def fetch_arxiv_metadata(
         + urllib.parse.urlencode({"id_list": arxiv_id, "max_results": 1})
     )
 
+    global _last_request_ts
     last_err: Exception | None = None
     xml_text = ""
     for attempt in range(retries + 1):
         try:
+            _polite_wait()
             req = urllib.request.Request(
                 url, headers={"User-Agent": "elsa-runtime/paper_harvest"}
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 xml_text = resp.read().decode("utf-8", errors="replace")
+            _last_request_ts = time.monotonic()
             break
         except Exception as exc:
             last_err = exc
+            _last_request_ts = time.monotonic()
             if attempt < retries:
-                time.sleep(retry_backoff ** attempt)
+                if _is_rate_limit_error(exc):
+                    # arXiv 429: back off significantly. ToS suggests at
+                    # least several seconds between requests during burst;
+                    # we wait rate_limit_cooldown so the throttle clears.
+                    logger.info(
+                        "arXiv 429 on %s, sleeping %.0fs before retry %d",
+                        arxiv_id, rate_limit_cooldown, attempt + 2,
+                    )
+                    time.sleep(rate_limit_cooldown)
+                else:
+                    time.sleep(retry_backoff ** attempt)
                 continue
             logger.warning(
                 "arXiv metadata fetch failed for %s after %d attempts: %s",
