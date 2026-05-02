@@ -915,12 +915,11 @@ PERSIST_LATEST = Path(
 PERSIST_ARCHIVE_DIR = Path(
     os.path.expanduser("~/Projects/elsa-workspace/data/briefings")
 )
-PERSIST_ARCHIVE_OLD_DIR = PERSIST_ARCHIVE_DIR / "_archive"
 
-# Number of days to keep flat in briefings/. Older snapshots move to
-# briefings/_archive/<year>/. This caps the count of files visible to
-# any reflexive `ls briefings/` (the same anti-pattern that crashed
-# Elsa's session on 2026-05-02 with an 8.7 MB PDF directory listing).
+# Days to keep snapshots in briefings/. Older snapshots are deleted
+# entirely (per main user direction 2026-05-03: 「最多存一週或一個月，
+# 不用存太多啦」). Trajectory log in LanceDB is the long-term audit
+# store; raw JSON snapshots are short-term inspection only.
 PERSIST_RETAIN_DAYS = 30
 
 
@@ -930,7 +929,7 @@ class PersistForElsaNode(DeterministicNode[BriefingState]):
 
     - latest: today-briefing.md (overwritten each run, single file)
     - archive: data/briefings/YYYY-MM-DD-HHmm.json (full state snapshot;
-      auto-rotated to _archive/<year>/ after PERSIST_RETAIN_DAYS days)
+      auto-pruned after PERSIST_RETAIN_DAYS days)
     """
 
     name = "persist_for_elsa"
@@ -955,36 +954,39 @@ class PersistForElsaNode(DeterministicNode[BriefingState]):
             encoding="utf-8",
         )
 
-        # Rotate older snapshots out of the flat directory so any
-        # reflexive `ls briefings/` stays bounded. Failure here must NOT
-        # block the briefing — it's housekeeping.
+        # Prune snapshots older than retain window. Failure must NOT
+        # block the briefing send — housekeeping only.
         try:
-            self._rotate_old_archives(now)
+            self._prune_old_archives(now)
         except Exception as e:
-            state.errors.append(f"persist_for_elsa rotation: {e}")
+            state.errors.append(f"persist_for_elsa prune: {e}")
 
         state.persisted_path = str(archive_path)
         return state
 
     @staticmethod
-    def _rotate_old_archives(now: datetime, retain_days: int = PERSIST_RETAIN_DAYS) -> None:
-        """Move briefings/*.json older than ``retain_days`` to
-        briefings/_archive/<year>/.
+    def _prune_old_archives(now: datetime, retain_days: int = PERSIST_RETAIN_DAYS) -> int:
+        """Delete briefings/*.json files older than ``retain_days``.
 
-        Older snapshots stay accessible (no deletion) but only via the
-        explicit ``_archive`` subdirectory — invisible to a default
-        ``ls briefings/`` listing.
+        Returns the number of files deleted. Caps any reflexive
+        ``ls briefings/`` listing to ~retain_days entries — the same
+        anti-pattern that crashed Elsa's session on 2026-05-02 with an
+        8.7 MB PDF directory listing.
+
+        Long-term audit lives in LanceDB ``trajectory`` table; raw JSON
+        snapshots are short-term inspection only.
         """
         if not PERSIST_ARCHIVE_DIR.exists():
-            return
+            return 0
         cutoff = now.timestamp() - retain_days * 86400
+        deleted = 0
         for entry in PERSIST_ARCHIVE_DIR.iterdir():
-            # Skip the _archive subdirectory and any non-snapshot files.
             if not entry.is_file():
                 continue
             if entry.suffix != ".json":
                 continue
             if entry.name.startswith("_"):
+                # Reserved namespace (_index.jsonl etc.) — never touch.
                 continue
             try:
                 mtime = entry.stat().st_mtime
@@ -992,16 +994,12 @@ class PersistForElsaNode(DeterministicNode[BriefingState]):
                 continue
             if mtime >= cutoff:
                 continue
-            # Derive year for the archive subdir from the filename
-            # (YYYY-MM-DD-HHmm.json) when possible, else from mtime.
-            year = entry.name[:4] if entry.name[:4].isdigit() else datetime.fromtimestamp(mtime).strftime("%Y")
-            year_dir = PERSIST_ARCHIVE_OLD_DIR / year
-            year_dir.mkdir(parents=True, exist_ok=True)
-            target = year_dir / entry.name
-            # Avoid clobber on collision (rare: same minute repeat run).
-            if target.exists():
-                target = year_dir / f"{entry.stem}-dup{int(mtime)}{entry.suffix}"
-            entry.rename(target)
+            try:
+                entry.unlink()
+                deleted += 1
+            except OSError:
+                continue
+        return deleted
 
     @staticmethod
     def _render_markdown(state: BriefingState, stamp: str) -> str:
