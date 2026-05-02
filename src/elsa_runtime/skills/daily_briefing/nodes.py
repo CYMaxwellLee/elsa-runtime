@@ -915,14 +915,22 @@ PERSIST_LATEST = Path(
 PERSIST_ARCHIVE_DIR = Path(
     os.path.expanduser("~/Projects/elsa-workspace/data/briefings")
 )
+PERSIST_ARCHIVE_OLD_DIR = PERSIST_ARCHIVE_DIR / "_archive"
+
+# Number of days to keep flat in briefings/. Older snapshots move to
+# briefings/_archive/<year>/. This caps the count of files visible to
+# any reflexive `ls briefings/` (the same anti-pattern that crashed
+# Elsa's session on 2026-05-02 with an 8.7 MB PDF directory listing).
+PERSIST_RETAIN_DAYS = 30
 
 
 class PersistForElsaNode(DeterministicNode[BriefingState]):
     """Write the final briefing to two places so Elsa's 24/7 session
     can read it on the next turn:
 
-    - latest: today-briefing.md (overwritten each run)
-    - archive: data/briefings/YYYY-MM-DD-HHmm.json (full state snapshot)
+    - latest: today-briefing.md (overwritten each run, single file)
+    - archive: data/briefings/YYYY-MM-DD-HHmm.json (full state snapshot;
+      auto-rotated to _archive/<year>/ after PERSIST_RETAIN_DAYS days)
     """
 
     name = "persist_for_elsa"
@@ -936,19 +944,64 @@ class PersistForElsaNode(DeterministicNode[BriefingState]):
         PERSIST_LATEST.parent.mkdir(parents=True, exist_ok=True)
         PERSIST_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
-        # latest: human-readable markdown
+        # latest: human-readable markdown (overwritten)
         latest_md = self._render_markdown(state, stamp)
         PERSIST_LATEST.write_text(latest_md, encoding="utf-8")
 
-        # archive: full JSON snapshot
+        # archive: full JSON snapshot (accumulates, then rotates)
         archive_path = PERSIST_ARCHIVE_DIR / f"{stamp}.json"
         archive_path.write_text(
             json.dumps(state.model_dump(), ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
 
+        # Rotate older snapshots out of the flat directory so any
+        # reflexive `ls briefings/` stays bounded. Failure here must NOT
+        # block the briefing — it's housekeeping.
+        try:
+            self._rotate_old_archives(now)
+        except Exception as e:
+            state.errors.append(f"persist_for_elsa rotation: {e}")
+
         state.persisted_path = str(archive_path)
         return state
+
+    @staticmethod
+    def _rotate_old_archives(now: datetime, retain_days: int = PERSIST_RETAIN_DAYS) -> None:
+        """Move briefings/*.json older than ``retain_days`` to
+        briefings/_archive/<year>/.
+
+        Older snapshots stay accessible (no deletion) but only via the
+        explicit ``_archive`` subdirectory — invisible to a default
+        ``ls briefings/`` listing.
+        """
+        if not PERSIST_ARCHIVE_DIR.exists():
+            return
+        cutoff = now.timestamp() - retain_days * 86400
+        for entry in PERSIST_ARCHIVE_DIR.iterdir():
+            # Skip the _archive subdirectory and any non-snapshot files.
+            if not entry.is_file():
+                continue
+            if entry.suffix != ".json":
+                continue
+            if entry.name.startswith("_"):
+                continue
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+            if mtime >= cutoff:
+                continue
+            # Derive year for the archive subdir from the filename
+            # (YYYY-MM-DD-HHmm.json) when possible, else from mtime.
+            year = entry.name[:4] if entry.name[:4].isdigit() else datetime.fromtimestamp(mtime).strftime("%Y")
+            year_dir = PERSIST_ARCHIVE_OLD_DIR / year
+            year_dir.mkdir(parents=True, exist_ok=True)
+            target = year_dir / entry.name
+            # Avoid clobber on collision (rare: same minute repeat run).
+            if target.exists():
+                target = year_dir / f"{entry.stem}-dup{int(mtime)}{entry.suffix}"
+            entry.rename(target)
 
     @staticmethod
     def _render_markdown(state: BriefingState, stamp: str) -> str:
