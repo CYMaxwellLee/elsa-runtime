@@ -52,6 +52,15 @@ def main() -> int:
         f"rejected={len(result.get('rejected_items', []))} "
         f"persisted={result.get('persisted_path', '')}"
     )
+    # Surface state.errors trail (informational; SendBriefingNode logs
+    # which path it took here — "MCP path succeeded" or
+    # "MCP path failed (...); falling back to HTTPS direct POST" then
+    # "HTTPS fallback succeeded"). Captured in launchd briefing-stdout.log
+    # so production runs are self-documenting; the persisted JSON
+    # snapshot is taken before SendBriefingNode runs and so cannot
+    # carry the send-path info.
+    for line in result.get("errors", []) or []:
+        print(f"[daily_briefing] {line}")
     return 0 if result.get("sent") else 1
 
 
