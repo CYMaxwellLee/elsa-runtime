@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import base64
 from email import message_from_bytes
+from email.message import Message
 from unittest.mock import MagicMock
 
-import pytest
 
 from elsa_runtime.tools.gmail.compose import GmailComposer
 
@@ -47,7 +47,7 @@ def _make_mock_service(message_headers=None):
     return service
 
 
-def _decode_raw(body: dict) -> "Message":
+def _decode_raw(body: dict) -> Message:
     """Pull the MIME message out of a draft body's `raw` field."""
     raw = body["message"]["raw"]
     raw_bytes = base64.urlsafe_b64decode(raw)

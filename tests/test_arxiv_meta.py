@@ -6,7 +6,6 @@ the suite stays offline-runnable.
 
 from __future__ import annotations
 
-import io
 import urllib.request
 from unittest.mock import patch
 

@@ -134,7 +134,6 @@ def fetch_arxiv_metadata(
     )
 
     global _last_request_ts
-    last_err: Exception | None = None
     xml_text = ""
     for attempt in range(retries + 1):
         try:
@@ -147,7 +146,6 @@ def fetch_arxiv_metadata(
             _last_request_ts = time.monotonic()
             break
         except Exception as exc:
-            last_err = exc
             _last_request_ts = time.monotonic()
             if attempt < retries:
                 if _is_rate_limit_error(exc):

@@ -29,7 +29,6 @@ import gzip
 import json
 import os
 import shutil
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -294,7 +293,7 @@ if __name__ == "__main__":
         assert len(log_files) == 1, f"Expected 1 log file, got {len(log_files)}"
 
         with open(log_files[0]) as f:
-            lines = [l for l in f if l.strip()]
+            lines = [line for line in f if line.strip()]
         assert len(lines) == 6, f"Expected 6 lines, got {len(lines)}"
 
         # Test aggregation

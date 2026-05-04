@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import base64
 from email.mime.text import MIMEText
-from email.utils import formataddr
 from typing import Any
 
 

@@ -12,12 +12,9 @@ Usage:
 """
 
 import argparse
-import asyncio
 import json
 import os
-import re
 import sys
-import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -25,13 +22,14 @@ import yaml
 
 from mcp.server.fastmcp import FastMCP
 
-# Ensure elsa-runtime src is importable
+# Ensure elsa-runtime src is importable. The two imports below MUST
+# stay after the sys.path tweak — ruff E402 noqa is intentional.
 _runtime_src = str(Path(__file__).resolve().parent.parent / "src")
 if _runtime_src not in sys.path:
     sys.path.insert(0, _runtime_src)
 
-from elsa_runtime.storage import get_store
-from elsa_runtime.knowledge.insight_store import InsightStore
+from elsa_runtime.storage import get_store  # noqa: E402
+from elsa_runtime.knowledge.insight_store import InsightStore  # noqa: E402
 
 mcp = FastMCP("elsa-knowledge", host="0.0.0.0", port=9100)
 

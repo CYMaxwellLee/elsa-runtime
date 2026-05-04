@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import io
-import zipfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 
 from elsa_runtime.tools.gdocs.universal import (
     MIME_DOC_LEGACY,

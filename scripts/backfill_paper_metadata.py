@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -82,10 +81,9 @@ def backfill_paper(tbl, arxiv_id: str) -> tuple[bool, str, str]:
         return False, "", meta.venue
 
     # Update via lance native — only writes the metadata columns, no
-    # vector / text disturbance.
+    # vector / text disturbance. lance handles `values` parameter
+    # escaping; only `where` (a raw SQL fragment) needs manual escape.
     safe_id = _escape_sql_string(arxiv_id)
-    safe_authors = _escape_sql_string(meta.authors)
-    safe_venue = _escape_sql_string(meta.venue or "")
 
     where = f"arxiv_id = '{safe_id}'"
     values = {

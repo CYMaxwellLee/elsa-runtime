@@ -1,10 +1,8 @@
 """Tests for schema migration utilities."""
 import pyarrow as pa
-import pytest
 
 from elsa_runtime.storage.schema import FieldDef, TableSchema, get_schema
 from elsa_runtime.storage.migration import (
-    PYARROW_TYPES,
     build_default_row,
     detect_schema_diff,
     schema_to_arrow,

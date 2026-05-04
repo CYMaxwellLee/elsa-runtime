@@ -1,7 +1,6 @@
 """Unit tests for PaperSplitter orchestrator."""
 
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -10,7 +9,6 @@ from elsa_runtime.paper.splitter import (
     Section,
     SectionIndex,
     SplitMethod,
-    SplitResult,
     SourceUnavailable,
 )
 

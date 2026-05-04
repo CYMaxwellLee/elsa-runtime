@@ -9,7 +9,7 @@ Methods 1/2 on papers where those methods succeed, to measure
 Method 3's accuracy before trusting it on papers where it's the only option.
 """
 
-from .splitter import BaseSplitter, Section, SplitMethod, SourceUnavailable
+from .splitter import BaseSplitter, Section
 
 
 class LlmSplitter(BaseSplitter):

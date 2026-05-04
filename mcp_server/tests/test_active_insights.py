@@ -1,12 +1,8 @@
 """Tests for ACTIVE-INSIGHTS.md auto-promote logic."""
-import pytest
-from pathlib import Path
 from mcp_server.active_insights import (
     should_promote,
     get_target_workspaces,
-    format_entry,
     read_active_insights,
-    write_active_insights,
     promote_insight,
     update_insight_in_active,
     MAX_ENTRIES,

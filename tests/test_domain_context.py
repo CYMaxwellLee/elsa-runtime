@@ -6,7 +6,6 @@ import pytest
 
 from elsa_runtime.knowledge.domain_context import (
     AGENT_DOMAIN_CONFIG,
-    DomainConfig,
     build_domain_context,
 )
 from elsa_runtime.storage.vectorstore import SearchResult, VectorStore

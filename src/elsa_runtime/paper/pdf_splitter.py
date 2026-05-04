@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pymupdf  # PyMuPDF
 
-from .splitter import BaseSplitter, Section, SplitMethod, SourceUnavailable
+from .splitter import BaseSplitter, Section, SourceUnavailable
 
 
 class PdfStructuralSplitter(BaseSplitter):

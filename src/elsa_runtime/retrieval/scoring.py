@@ -47,7 +47,6 @@ def rrf_fusion(
         )
 
     # BM25 hits: add 15% boost
-    bm25_ids = {r.id for r in bm25_results}
     for r in bm25_results:
         if r.id in merged:
             merged[r.id].score += merged[r.id].original_score * 0.15
