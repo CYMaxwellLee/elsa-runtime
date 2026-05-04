@@ -1033,7 +1033,33 @@ class PersistForElsaNode(DeterministicNode[BriefingState]):
 
 # ──────────────────────────────────────────────────────────────────
 # Stage 7: Send (terminal, hack #4 retire)
+#
+# 5/3 + 5/4 production failures: claude --print subprocess could not
+# load mcp__plugin_telegram_telegram__reply ("ToolSearch found no
+# matching deferred tool"). Plugin tools register via the Claude Code
+# plugin system but appear deferred under --print mode; even a
+# ToolSearch hint in-prompt did not surface them.
+#
+# Fix (5/4): hybrid path. Try MCP first (Elsa's preferred path; if the
+# CLI/plugin interaction is fixed upstream this becomes seamless), then
+# always fall back to a direct HTTPS POST against the Telegram bot
+# API. Briefing send is mission-critical: the terminal node MUST
+# deliver, even if the upstream "force-Elsa-through-MCP" preference
+# can't be honored on this run. Path taken is recorded in
+# state.errors for post-mortem visibility.
 # ──────────────────────────────────────────────────────────────────
+
+
+# Telegram bot config: shared with workspace/scripts/trigger-briefing.sh
+TELEGRAM_BOT_API = "https://api.telegram.org/bot{token}/sendMessage"
+TELEGRAM_TOKEN_ENV_FILE = Path(
+    os.path.expanduser(
+        "~/Projects/elsa-workspace/data/telegram-state/.env"
+    )
+)
+TELEGRAM_TOKEN_ENV_KEYS = ("TELEGRAM_BOT_TOKEN", "BOT_TOKEN", "TELEGRAM_TOKEN")
+TELEGRAM_DEFAULT_CHAT_ID = "1044616033"  # main user
+TELEGRAM_MAX_MESSAGE_CHARS = 4000  # Telegram cap is 4096; leave headroom
 
 
 class _SendOutput(BaseModel):
@@ -1048,9 +1074,11 @@ class _SendSig(Signature):
 
 
 class SendBriefingNode(TerminalNode[BriefingState]):
-    """Graph terminal. Forces Elsa to use the telegram MCP to send the
-    EXACT briefing_text already verified upstream. Replaces Layer 4
-    PreToolUse hook (hack #4)."""
+    """Graph terminal. Hybrid send: MCP primary, HTTPS fallback.
+
+    Topology guarantees this node is unreachable without going through
+    ApplyFilterNode + EvidenceAttachedVerifier upstream. Replaces Layer 4
+    PreToolUse hook (hack #4 retire)."""
 
     name = "send_briefing"
     inputs = ["briefing_text", "dry_run"]
@@ -1072,41 +1100,152 @@ class SendBriefingNode(TerminalNode[BriefingState]):
             state.sent = True
             return state
 
-        # Force Elsa to use telegram MCP, no other tool.
-        prompt = f"""You have one job: send the following briefing text to the master
-via the telegram reply MCP. Do not modify the text. Do not summarise.
-Do not translate. Do not add or remove any character.
+        # ---- Path 1: MCP via claude subprocess (Elsa-flavored) ----
+        mcp_error: str | None = None
+        try:
+            result = self._send_via_mcp(text)
+            if result.get("sent"):
+                state.errors.append("send_briefing: MCP path succeeded")
+                state.sent = True
+                return state
+            mcp_error = str(result.get("note") or "MCP returned sent=false")
+        except Exception as e:
+            mcp_error = f"{type(e).__name__}: {e}"
 
-Allowed tool: mcp__plugin_telegram_telegram__reply (and ONLY that tool).
+        state.errors.append(
+            f"send_briefing: MCP path failed ({mcp_error[:200]}); "
+            "falling back to HTTPS direct POST"
+        )
 
-Call the MCP with the exact text below. After the MCP returns, output
-JSON: {{"sent": true, "note": "<mcp response summary>"}}.
+        # ---- Path 2: HTTPS fallback (bulletproof) ----
+        try:
+            self._send_via_https(text)
+        except Exception as e:
+            raise NodeExecutionError(
+                f"send_briefing: BOTH paths failed. "
+                f"MCP: {mcp_error}. HTTPS: {type(e).__name__}: {e}"
+            ) from e
 
-If the MCP fails, output {{"sent": false, "note": "<error>"}}.
+        state.errors.append("send_briefing: HTTPS fallback succeeded")
+        state.sent = True
+        return state
+
+    # ---- Path 1: MCP ----
+
+    def _send_via_mcp(self, text: str) -> dict:
+        prompt = f"""You have ONE job: deliver the briefing text below to the master
+via the telegram reply MCP, verbatim.
+
+The telegram MCP tool is `mcp__plugin_telegram_telegram__reply`. It may
+appear as a deferred tool in this session — if your first attempt to call
+it fails with a "tool not loaded" or "ToolSearch found no matching" error:
+
+  1. Call ToolSearch with query "select:mcp__plugin_telegram_telegram__reply"
+     to load the tool's schema.
+  2. Then call mcp__plugin_telegram_telegram__reply with the exact text below.
+
+Do NOT modify, summarise, translate, paraphrase, truncate, or otherwise
+alter the briefing text. Send it verbatim.
+
+After the MCP call returns, output JSON exactly matching:
+  {{"sent": true, "note": "<short response summary>"}}
+If both ToolSearch+call attempts fail, output:
+  {{"sent": false, "note": "<the exact error you saw>"}}
 
 === BEGIN BRIEFING TEXT (send verbatim) ===
 {text}
-=== END BRIEFING TEXT ===
-"""
+=== END BRIEFING TEXT ==="""
 
+        result = call_claude(
+            prompt,
+            json_schema=_SendOutput.model_json_schema(),
+            allowed_tools=["ToolSearch"] + MCP_TELEGRAM_SEND,
+            timeout=240,
+        )
+        if not isinstance(result, dict):
+            return {"sent": False, "note": f"unexpected MCP output: {result!r}"}
+        return result
+
+    # ---- Path 2: HTTPS direct ----
+
+    def _send_via_https(self, text: str) -> None:
+        token = self._resolve_bot_token()
+        if not token:
+            raise RuntimeError(
+                "telegram bot token not in env or "
+                f"{TELEGRAM_TOKEN_ENV_FILE}"
+            )
+        chat_id = os.environ.get("ELSA_TELEGRAM_CHAT_ID") or TELEGRAM_DEFAULT_CHAT_ID
+
+        # Local import keeps pyproject.toml's existing httpx dep contained
+        # to where it's used, and lets unit tests monkeypatch.
+        import httpx
+
+        chunks = self._split_for_telegram(text)
+        api = TELEGRAM_BOT_API.format(token=token)
+        for idx, chunk in enumerate(chunks, start=1):
+            try:
+                resp = httpx.post(
+                    api,
+                    data={"chat_id": chat_id, "text": chunk},
+                    timeout=30,
+                )
+            except httpx.HTTPError as e:
+                raise RuntimeError(f"chunk {idx}/{len(chunks)} POST failed: {e}") from e
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"chunk {idx}/{len(chunks)} -> HTTP {resp.status_code}: "
+                    f"{resp.text[:300]}"
+                )
+            payload = resp.json() if resp.headers.get("content-type", "").startswith(
+                "application/json"
+            ) else {}
+            if not payload.get("ok", False):
+                raise RuntimeError(
+                    f"chunk {idx}/{len(chunks)} -> Telegram replied not-ok: "
+                    f"{str(payload)[:300]}"
+                )
+
+    @staticmethod
+    def _resolve_bot_token() -> str | None:
+        for k in TELEGRAM_TOKEN_ENV_KEYS:
+            v = os.environ.get(k)
+            if v:
+                return v.strip()
+        if not TELEGRAM_TOKEN_ENV_FILE.exists():
+            return None
         try:
-            result = call_claude(
-                prompt,
-                json_schema=_SendOutput.model_json_schema(),
-                allowed_tools=MCP_TELEGRAM_SEND,
-                timeout=240,
-            )
-        except ClaudeWorkerError as e:
-            raise NodeExecutionError(
-                f"send_briefing: claude/MCP send failed: {e}"
-            ) from e
+            for line in TELEGRAM_TOKEN_ENV_FILE.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                if key.strip() in TELEGRAM_TOKEN_ENV_KEYS:
+                    return val.strip().strip('"').strip("'")
+        except OSError:
+            return None
+        return None
 
-        sent = bool(result.get("sent", False))
-        if not sent:
-            raise NodeExecutionError(
-                f"send_briefing: telegram MCP reported failure: "
-                f"{result.get('note', '<no note>')}"
-            )
+    @staticmethod
+    def _split_for_telegram(text: str, limit: int = TELEGRAM_MAX_MESSAGE_CHARS) -> list[str]:
+        """Split text into Telegram-safe chunks, preferring paragraph
+        boundaries, then line boundaries, then hard cut."""
+        text = text.rstrip()
+        if len(text) <= limit:
+            return [text]
 
-        state.sent = True
-        return state
+        chunks: list[str] = []
+        remaining = text
+        while len(remaining) > limit:
+            cut = remaining.rfind("\n\n", 0, limit)
+            if cut < limit // 2:  # avoid degenerate tiny chunks
+                cut = remaining.rfind("\n", 0, limit)
+            if cut < limit // 2:
+                cut = remaining.rfind(" ", 0, limit)
+            if cut <= 0:
+                cut = limit  # hard cut as last resort
+            chunks.append(remaining[:cut].rstrip())
+            remaining = remaining[cut:].lstrip()
+        if remaining:
+            chunks.append(remaining)
+        return chunks
