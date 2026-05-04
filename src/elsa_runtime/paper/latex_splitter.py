@@ -17,7 +17,7 @@ import tarfile
 import requests
 from pathlib import Path
 
-from .splitter import BaseSplitter, Section, SplitMethod, SourceUnavailable
+from .splitter import BaseSplitter, Section, SourceUnavailable
 from .latex_cleaner import clean_latex
 
 logger = logging.getLogger(__name__)
@@ -308,7 +308,7 @@ class ArxivLatexSplitter(BaseSplitter):
                     content=cleaned,
                     level=1,
                     order=0,
-                    estimated_tokens=len(cleaned) // 4,
+                    estimated_tokens=max(1, len(cleaned) // 4),
                 )
             ]
 
@@ -323,16 +323,17 @@ class ArxivLatexSplitter(BaseSplitter):
         )
         if abstract_match:
             abstract_text = clean_latex(abstract_match.group(1))
-            sections.append(
-                Section(
-                    id="section:Abstract",
-                    title="Abstract",
-                    content=abstract_text,
-                    level=1,
-                    order=0,
-                    estimated_tokens=len(abstract_text) // 4,
+            if abstract_text.strip():  # don't append empty abstract block
+                sections.append(
+                    Section(
+                        id="section:Abstract",
+                        title="Abstract",
+                        content=abstract_text,
+                        level=1,
+                        order=0,
+                        estimated_tokens=max(1, len(abstract_text) // 4),
+                    )
                 )
-            )
 
         # Extract each section
         for i, match in enumerate(matches):
@@ -362,6 +363,32 @@ class ArxivLatexSplitter(BaseSplitter):
             if fig_refs:
                 metadata["has_figures"] = fig_refs
 
+            # Skip sections that have neither prose nor other rich
+            # content (figures / tables / equations) AND are not parent
+            # headers (i.e. NOT immediately followed by a deeper-level
+            # subsection). The latter case ("\section{Method}" followed
+            # only by subsections with the actual body) is a legitimate
+            # parent section header and must be kept; tests/test_latex_
+            # splitter.py::test_finds_all_sections pins that contract.
+            #
+            # The orphan-empty-section drop fixes
+            # tests/integration/test_arxiv_splitter.py::TestSplitRealPaper
+            # ::test_no_empty_sections (real arxiv paper produced an
+            # empty "Results" section, no children, no body, no figures).
+            next_match = matches[i + 1] if i + 1 < len(matches) else None
+            next_level = (
+                self.LEVEL_MAP.get(next_match.group(1), 1)
+                if next_match else 0
+            )
+            is_parent_header = next_level > level
+            has_other_content = bool(metadata)
+            if (
+                not cleaned_body.strip()
+                and not has_other_content
+                and not is_parent_header
+            ):
+                continue
+
             section_id = f"{cmd}:{title}"
 
             sections.append(
@@ -371,7 +398,9 @@ class ArxivLatexSplitter(BaseSplitter):
                     content=cleaned_body,
                     level=level,
                     order=len(sections),
-                    estimated_tokens=len(cleaned_body) // 4,
+                    # Floor at 1 token so the no-empty-sections invariant
+                    # holds even for figure-only / table-only sections.
+                    estimated_tokens=max(1, len(cleaned_body) // 4),
                     metadata=metadata,
                 )
             )

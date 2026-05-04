@@ -25,10 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
-import os
-import sys
 import time
 from collections import Counter
 from datetime import datetime
@@ -314,7 +311,7 @@ def write_dry_run_report(report_path: Path, results: list[dict]) -> None:
     clean = [r for r in successful if not r["analysis"]["flags"]]
 
     lines = [
-        f"# Paper Harvest Dry-Run Report",
+        "# Paper Harvest Dry-Run Report",
         "",
         f"_Generated: {datetime.now().isoformat(timespec='seconds')}_",
         "",
@@ -555,8 +552,11 @@ async def main():
             if r["status"] == "dry_run" and r["analysis"].get("flags")
         )
         logger.info(
+            # `dry` (line above) counts status=="dry_run"; clean = dry - flagged.
+            # Was previously `ok - flagged` (introduced 4/28, NameError typo
+            # caught by ruff F821 on 5/4).
             "Dry-run summary: %d clean, %d flagged, %d failed. See %s",
-            ok - flagged, flagged, failed, report_path,
+            dry - flagged, flagged, failed, report_path,
         )
 
 

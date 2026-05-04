@@ -5,9 +5,7 @@ bypassing MCP transport. They use a real LanceDB in a temp directory.
 """
 
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -108,7 +106,11 @@ class TestSaveInsight:
         assert result["operation"] == "REJECTED"
         assert "credential" in result["reason"]
 
-    async def test_reject_invalid_domain(self):
+    async def test_unknown_domain_accepted_with_warning(self):
+        """Per the 4/9 normalize-with-warning policy (eb58b2af), unknown
+        domains are no longer rejected — they're accepted as free-form
+        with an advisory warning. The OLD test expected REJECTED; this
+        version pins the new permissive contract."""
         from mcp_server.server import save_insight
 
         result = parse(await save_insight(
@@ -117,8 +119,11 @@ class TestSaveInsight:
             source_type="paper_analysis",
             agent_id="elsa",
         ))
-        assert result["operation"] == "REJECTED"
-        assert "domain" in result["reason"]
+        assert result["operation"] == "ADD"
+        # Implementation surfaces a warning when domain is not in
+        # CANONICAL_DOMAINS (see server.py around line 425-426).
+        assert "warning" in result
+        assert "invalid_domain" in result["warning"] or "domain" in result["warning"].lower()
 
     async def test_reject_invalid_agent(self):
         from mcp_server.server import save_insight

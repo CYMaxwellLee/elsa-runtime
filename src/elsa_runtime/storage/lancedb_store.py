@@ -7,7 +7,6 @@ import random
 from typing import Any
 
 import lancedb
-import pyarrow as pa
 
 from elsa_runtime.storage.vectorstore import SearchResult, WriteResult
 
@@ -208,14 +207,27 @@ class LanceDBStore:
             except Exception:
                 pass
 
-        # Delete old records
-        await self.delete(table, ids)
+        # Filter out IDs that do not actually exist. Without this guard
+        # the subsequent add() would silently CREATE new records for
+        # non-existent IDs and return them as "update" operations,
+        # making update_insight on a missing ID look successful.
+        # See test_write_tools.TestUpdateInsight.test_update_not_found
+        # for the contract this enforces.
+        present_ids = [i for i in ids if i in existing_by_id]
+        if not present_ids:
+            return []
 
-        # Prepare new data — merge old metadata with new
+        # Delete only the records that actually exist.
+        await self.delete(table, present_ids)
+
+        # Prepare new data — merge old metadata with new — for present IDs.
         new_docs: list[str] = []
         new_metas: list[dict[str, Any]] = []
-        for i, doc_id in enumerate(ids):
-            old = existing_by_id.get(doc_id, {})
+        for doc_id in present_ids:
+            # Position of doc_id in original ids list, to pick the
+            # caller's documents[i] / metadatas[i].
+            i = ids.index(doc_id)
+            old = existing_by_id[doc_id]
 
             if documents is not None:
                 new_docs.append(documents[i])
@@ -232,7 +244,7 @@ class LanceDBStore:
             else:
                 new_metas.append(old_meta)
 
-        results = await self.add(table, ids, new_docs, new_metas)
+        results = await self.add(table, present_ids, new_docs, new_metas)
         return [WriteResult(id=r.id, operation="update") for r in results]
 
     async def delete(self, table: str, ids: list[str]) -> int:
