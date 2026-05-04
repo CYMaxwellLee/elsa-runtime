@@ -8,7 +8,6 @@ the helper utilities.
 """
 from __future__ import annotations
 
-import os
 from unittest import mock
 
 import pytest

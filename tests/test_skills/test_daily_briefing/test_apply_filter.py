@@ -12,7 +12,6 @@ If THIS test breaks, daily-briefing tomorrow morning regresses to
 
 from __future__ import annotations
 
-import pytest
 
 from elsa_runtime.skills.daily_briefing.nodes import ApplyFilterNode
 from elsa_runtime.skills.daily_briefing.state import (

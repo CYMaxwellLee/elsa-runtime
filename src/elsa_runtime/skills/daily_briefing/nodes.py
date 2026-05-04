@@ -39,13 +39,11 @@ from elsa_runtime.module import (
     Signature,
     TerminalNode,
     Verdict,
-    Verifier,
 )
 
 from .claude_worker import ClaudeWorkerError, call_claude
 from .state import (
     BriefingState,
-    BriefingSection,
     CalendarRef,
     CandidateItem,
     DriveRef,
@@ -303,7 +301,7 @@ class DriveIndexNode(LLMNode[BriefingState]):
     max_retries = 2
 
     def _call_llm(self, inputs, error_context=None):
-        prompt = f"""You are a Drive index worker for Elsa's daily briefing pipeline.
+        prompt = """You are a Drive index worker for Elsa's daily briefing pipeline.
 
 TASK: list recently shared Drive docs (last 7 days). If Drive search MCP
 unavailable, return empty docs list with no error.
@@ -1014,7 +1012,7 @@ class PersistForElsaNode(DeterministicNode[BriefingState]):
             state.briefing_text or "(empty)",
             "```",
             "",
-            f"## Stats",
+            "## Stats",
             "",
             f"- Filtered items: {len(state.filtered_items)}",
             f"- Rejected items: {len(state.rejected_items)}",

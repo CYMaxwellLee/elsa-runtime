@@ -8,7 +8,6 @@ from elsa_runtime.module import (
     DeterministicNode,
     LLMNode,
     NodeExecutionError,
-    PydanticVerifier,
     RouterNode,
     Signature,
     TerminalNode,
