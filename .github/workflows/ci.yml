@@ -12,6 +12,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -e ".[dev]"
+      # Install all extras so tests that exercise mcp_server/ + gmail/
+      # gdocs tools have their imports satisfied. CI was previously
+      # only installing [dev] which made the mcp tests error out at
+      # collection time with ModuleNotFoundError: 'mcp', and the
+      # gdocs_universal tests with ModuleNotFoundError: 'docx'.
+      - run: pip install -e ".[dev,mcp,gmail]"
       - run: ruff check .
       - run: pytest
