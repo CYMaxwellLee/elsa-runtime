@@ -12,6 +12,7 @@ from email import message_from_bytes
 from email.message import Message
 from unittest.mock import MagicMock
 
+import pytest
 
 from elsa_runtime.tools.gmail.compose import GmailComposer
 
@@ -252,3 +253,201 @@ class TestSecurityBoundary:
         assert send_like == [], (
             f"GmailComposer must not expose send-like methods, found: {send_like}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v3.51-A.x (2026-05-05): html_body + attachments support
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestHtmlBody:
+    """When html_body is set, message becomes multipart/alternative
+    so mail clients render HTML and bypass plain-text line folding."""
+
+    def test_no_html_body_stays_plain_text(self):
+        service = _make_mock_service()
+        GmailComposer(service).create_draft_reply(
+            thread_id="t1", to=["a@b.com"], body="hello",
+        )
+        msg = _decode_raw(service._captured_body)
+        assert msg.get_content_type() == "text/plain"
+
+    def test_html_body_only_yields_alternative_multipart(self):
+        service = _make_mock_service()
+        GmailComposer(service).create_draft_reply(
+            thread_id="t1", to=["a@b.com"],
+            body="plain hello", html_body="<p>html hello</p>",
+        )
+        msg = _decode_raw(service._captured_body)
+        assert msg.is_multipart()
+        assert msg.get_content_type() == "multipart/alternative"
+        parts = msg.get_payload()
+        types = sorted(p.get_content_type() for p in parts)
+        assert types == ["text/html", "text/plain"]
+
+    def test_html_body_preserves_unicode(self):
+        service = _make_mock_service()
+        GmailComposer(service).create_draft_reply(
+            thread_id="t1", to=["a@b.com"],
+            body="主人您好", html_body="<p>主人您好</p>",
+        )
+        msg = _decode_raw(service._captured_body)
+        for part in msg.get_payload():
+            content = part.get_payload(decode=True).decode("utf-8")
+            assert "主人您好" in content
+
+
+class TestAttachments:
+    """attachments=[<paths>] base64-encodes files into multipart/mixed."""
+
+    def test_no_attachments_no_multipart(self, tmp_path):
+        service = _make_mock_service()
+        GmailComposer(service).create_draft_reply(
+            thread_id="t1", to=["a@b.com"], body="hello",
+            attachments=None,
+        )
+        msg = _decode_raw(service._captured_body)
+        assert not msg.is_multipart()
+
+    def test_empty_attachment_list_no_multipart(self, tmp_path):
+        service = _make_mock_service()
+        GmailComposer(service).create_draft_reply(
+            thread_id="t1", to=["a@b.com"], body="hello",
+            attachments=[],
+        )
+        msg = _decode_raw(service._captured_body)
+        assert not msg.is_multipart()
+
+    def test_single_pdf_attachment(self, tmp_path):
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4\nfake pdf bytes")
+        service = _make_mock_service()
+        GmailComposer(service).create_draft_reply(
+            thread_id="t1", to=["a@b.com"], body="see attached",
+            attachments=[str(pdf)],
+        )
+        msg = _decode_raw(service._captured_body)
+        assert msg.is_multipart()
+        assert msg.get_content_type() == "multipart/mixed"
+        parts = msg.get_payload()
+        # Should be: 1 text/plain body + 1 attachment
+        assert len(parts) == 2
+        att = parts[1]
+        assert att.get_filename() == "report.pdf"
+        assert att.get_content_type() == "application/pdf"
+        assert att.get("Content-Disposition", "").startswith("attachment")
+        # Payload base64-decodes back to original bytes
+        assert att.get_payload(decode=True) == b"%PDF-1.4\nfake pdf bytes"
+
+    def test_multiple_mixed_type_attachments(self, tmp_path):
+        pdf = tmp_path / "a.pdf"
+        png = tmp_path / "b.png"
+        txt = tmp_path / "c.txt"
+        pdf.write_bytes(b"PDF content")
+        png.write_bytes(b"\x89PNG\r\n\x1a\n fake png")
+        txt.write_text("plain text body of attachment", encoding="utf-8")
+
+        service = _make_mock_service()
+        GmailComposer(service).create_draft_reply(
+            thread_id="t1", to=["a@b.com"], body="see attached",
+            attachments=[str(pdf), str(png), str(txt)],
+        )
+        msg = _decode_raw(service._captured_body)
+        parts = msg.get_payload()
+        assert len(parts) == 4  # body + 3 attachments
+        att_types = [p.get_content_type() for p in parts[1:]]
+        att_names = [p.get_filename() for p in parts[1:]]
+        assert att_types == ["application/pdf", "image/png", "text/plain"]
+        assert att_names == ["a.pdf", "b.png", "c.txt"]
+
+    def test_unknown_extension_falls_back_to_octet_stream(self, tmp_path):
+        odd = tmp_path / "thing.fakeextxyz"
+        odd.write_bytes(b"random bytes")
+        service = _make_mock_service()
+        GmailComposer(service).create_draft_reply(
+            thread_id="t1", to=["a@b.com"], body="see attached",
+            attachments=[str(odd)],
+        )
+        att = _decode_raw(service._captured_body).get_payload()[1]
+        assert att.get_content_type() == "application/octet-stream"
+
+    def test_missing_file_raises_filenotfound(self, tmp_path):
+        service = _make_mock_service()
+        with pytest.raises(FileNotFoundError, match="attachment not found"):
+            GmailComposer(service).create_draft_reply(
+                thread_id="t1", to=["a@b.com"], body="hi",
+                attachments=[str(tmp_path / "ghost.pdf")],
+            )
+
+    def test_directory_path_rejected_as_not_a_file(self, tmp_path):
+        service = _make_mock_service()
+        with pytest.raises(FileNotFoundError, match="not a regular file"):
+            GmailComposer(service).create_draft_reply(
+                thread_id="t1", to=["a@b.com"], body="hi",
+                attachments=[str(tmp_path)],
+            )
+
+    def test_oversize_attachment_rejected(self, tmp_path, monkeypatch):
+        # Use monkeypatched smaller cap so we don't actually allocate 35 MiB.
+        from elsa_runtime.tools.gmail import compose as compose_mod
+        monkeypatch.setattr(compose_mod, "ATTACHMENT_MAX_BYTES", 100)
+        big = tmp_path / "big.bin"
+        big.write_bytes(b"x" * 200)
+        service = _make_mock_service()
+        with pytest.raises(ValueError, match="exceeds"):
+            GmailComposer(service).create_draft_reply(
+                thread_id="t1", to=["a@b.com"], body="hi",
+                attachments=[str(big)],
+            )
+
+    def test_real_35mb_constant_value(self):
+        from elsa_runtime.tools.gmail.compose import ATTACHMENT_MAX_BYTES
+        # Pin the documented limit (Gmail OAuth API base64-encoded cap).
+        assert ATTACHMENT_MAX_BYTES == 35 * 1024 * 1024
+
+
+class TestHtmlBodyAndAttachmentsCombined:
+    """When both html_body AND attachments are set, the layout is
+    multipart/mixed → multipart/alternative → text/plain + text/html,
+    plus attachment parts at the outer level."""
+
+    def test_full_layout(self, tmp_path):
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(b"PDF")
+
+        service = _make_mock_service()
+        GmailComposer(service).create_draft_reply(
+            thread_id="t1", to=["a@b.com"], body="plain",
+            html_body="<p>html</p>",
+            attachments=[str(pdf)],
+        )
+        outer = _decode_raw(service._captured_body)
+        assert outer.get_content_type() == "multipart/mixed"
+        outer_parts = outer.get_payload()
+        assert len(outer_parts) == 2  # alternative + 1 attachment
+
+        alt = outer_parts[0]
+        assert alt.get_content_type() == "multipart/alternative"
+        alt_types = sorted(p.get_content_type() for p in alt.get_payload())
+        assert alt_types == ["text/html", "text/plain"]
+
+        att = outer_parts[1]
+        assert att.get_content_type() == "application/pdf"
+        assert att.get_filename() == "doc.pdf"
+
+
+class TestExpandUserPath:
+    """Attachment paths support ~ expansion."""
+
+    def test_tilde_in_path_expanded(self, tmp_path, monkeypatch):
+        # Pretend home = tmp_path, then attach using "~/file.txt"
+        monkeypatch.setenv("HOME", str(tmp_path))
+        f = tmp_path / "file.txt"
+        f.write_text("hi", encoding="utf-8")
+        service = _make_mock_service()
+        GmailComposer(service).create_draft_reply(
+            thread_id="t1", to=["a@b.com"], body="hi",
+            attachments=["~/file.txt"],
+        )
+        att = _decode_raw(service._captured_body).get_payload()[1]
+        assert att.get_filename() == "file.txt"

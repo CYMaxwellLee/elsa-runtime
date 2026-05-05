@@ -568,24 +568,37 @@ async def create_draft_reply(
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
     in_reply_to_message_id: str = "",
+    html_body: str = "",
+    attachments: list[str] | None = None,
 ) -> str:
     """Create a Gmail draft attached to an existing thread (proper threaded reply).
 
     Use this instead of the Anthropic-managed `create_draft` connector when
     you want the draft to appear as a reply in the original conversation
     thread (where the user expects to find it). The Anthropic connector
-    cannot do this — its drafts always become orphan new threads.
+    cannot do this: its drafts always become orphan new threads.
 
     Args:
         thread_id: Gmail thread ID. Get it from search_threads / get_thread.
         to: Primary recipient email addresses.
-        body: Plain-text body of the reply.
+        body: Plain-text body of the reply. Always required (used as
+            text/plain fallback even when html_body is set).
         subject: Optional. If empty, derived from the original message
             (Re: original-subject) when in_reply_to_message_id is provided.
         cc, bcc: Optional CC/BCC lists.
         in_reply_to_message_id: Optional RFC 2822 Message-ID of the email
             being replied to (e.g. "<abc@mail.gmail.com>"). Improves
             threading in non-Gmail clients via In-Reply-To/References headers.
+        html_body: Optional HTML version of the body. When set, the message
+            is built as multipart/alternative; mail clients render the HTML
+            preferentially, bypassing the RFC 2822 78-char hard wrap that
+            mangles long plain-text paragraphs. Use this when sending body
+            with multi-line paragraphs you want clients to reflow.
+        attachments: Optional list of absolute paths to local files. Each
+            file is base64-encoded into the message; MIME type guessed from
+            extension. Per-file size cap 35 MiB (Gmail OAuth API limit).
+            Missing files return ATTACHMENT_NOT_FOUND; oversized files
+            return ATTACHMENT_TOO_LARGE.
 
     Returns:
         JSON string with operation status and draft ID.
@@ -600,6 +613,8 @@ async def create_draft_reply(
             cc=cc,
             bcc=bcc,
             in_reply_to_message_id=in_reply_to_message_id or None,
+            html_body=html_body or None,
+            attachments=attachments or None,
         )
         return json.dumps(
             {
@@ -607,19 +622,40 @@ async def create_draft_reply(
                 "draft_id": draft.get("id"),
                 "thread_id": thread_id,
                 "message_id": draft.get("message", {}).get("id"),
+                "attachments_count": len(attachments) if attachments else 0,
+                "html_body": bool(html_body),
             },
             ensure_ascii=False,
         )
     except FileNotFoundError as e:
+        # Disambiguate: missing creds vs missing attachment file.
+        msg = str(e)
+        if "attachment" in msg.lower():
+            return json.dumps(
+                {"operation": "ATTACHMENT_NOT_FOUND", "error": msg},
+                ensure_ascii=False,
+            )
         return json.dumps(
             {
                 "operation": "AUTH_REQUIRED",
-                "error": str(e),
+                "error": msg,
                 "hint": (
                     "Run: python3 ~/Projects/elsa-runtime/src/elsa_runtime/"
                     "tools/gmail/gmail_tool.py auth"
                 ),
             },
+            ensure_ascii=False,
+        )
+    except ValueError as e:
+        # Oversized attachment.
+        msg = str(e)
+        if "35" in msg or "exceed" in msg.lower():
+            return json.dumps(
+                {"operation": "ATTACHMENT_TOO_LARGE", "error": msg},
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {"operation": "ERROR", "error": msg},
             ensure_ascii=False,
         )
     except Exception as e:
