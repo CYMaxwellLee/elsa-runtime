@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -100,6 +101,16 @@ def call_claude(
         cwd: working directory for the subprocess
     """
     args: list[str] = [CLAUDE_BIN, "--print"]
+
+    # Model: explicit per A04 §2.1 -- all agents on `claude-opus-4-7`,
+    # `[1m]` 1M-context variant. The 1M variant also lifts the output
+    # token budget which matters for workers that emit long JSON (e.g.
+    # RiskHunterWorker with many candidate items).
+    # Fix 2026-05-12: previously bare `--print` defaulted to whatever
+    # claude CLI's user-global settings picked, which caused mid-JSON
+    # truncation in risk_hunter output 5/13 5:30 run (see
+    # meta/archive/incidents/ELSA-INCIDENT-2026-05-10.md §13 follow-up).
+    args += ["--model", "claude-opus-4-7[1m]"]
 
     # Permissions: launchd has no interactive UI, so we must skip prompts.
     # Risk bounded by allowed_tools whitelist + prompt design.
@@ -226,8 +237,76 @@ def _parse_json_output(out: str, raw_stderr: str = "") -> Any:
             except json.JSONDecodeError:
                 continue
 
+    # Last-ditch: try truncation recovery. LLM may have hit an internal
+    # output budget mid-JSON, leaving e.g. `{"items":[{...},{...},{"k`
+    # with incomplete trailing structure. _try_truncation_recovery walks
+    # the prefix to the last complete sub-value, then closes outstanding
+    # brackets. Warns to stderr so the caller surfaces that recovery
+    # fired (we want to know how often this happens; if frequent, raise
+    # model/context capacity or shrink prompt).
+    recovered = _try_truncation_recovery(out)
+    if recovered is not None:
+        sys.stderr.write(
+            "[claude_worker] WARNING: recovered partial JSON output "
+            f"from truncation (full output ended at: ...{out[-80:]!r})\n"
+        )
+        return recovered
+
     raise ClaudeWorkerError(
         msg="claude output is not valid JSON",
         stdout=out,
         stderr=raw_stderr,
     )
+
+
+def _try_truncation_recovery(out: str) -> Any | None:
+    """Recover from mid-JSON truncation by closing the last complete sub-value.
+
+    Strategy: find rightmost ``},`` or ``],`` (a complete sub-value followed
+    by comma); truncate before the comma; balance outstanding brackets by
+    walking the prefix while tracking string state. Returns parsed value or
+    ``None`` if no recovery possible.
+
+    Limitation: rfind of ``},`` / ``],`` doesn't check whether the match is
+    inside a string. For LLM-emitted structured outputs this is rarely an
+    issue (LLMs don't typically produce ``},`` literals inside string
+    values), but it's a known fragility. If it bites, switch to a proper
+    streaming JSON parser.
+    """
+    last_complete = max(out.rfind("},"), out.rfind("],"))
+    if last_complete < 0:
+        return None
+
+    # Truncate at the `}` or `]` (exclude the comma and everything after).
+    prefix = out[: last_complete + 1]
+
+    # Walk prefix to count unclosed brackets / braces, ignoring chars inside
+    # strings.
+    in_string = False
+    escape_next = False
+    stack: list[str] = []
+    for c in prefix:
+        if escape_next:
+            escape_next = False
+            continue
+        if in_string:
+            if c == "\\":
+                escape_next = True
+            elif c == '"':
+                in_string = False
+            continue
+        if c == '"':
+            in_string = True
+        elif c in "{[":
+            stack.append(c)
+        elif c in "}]":
+            if stack:
+                stack.pop()
+
+    closers = "".join("]" if o == "[" else "}" for o in reversed(stack))
+    recovered_str = prefix + closers
+
+    try:
+        return json.loads(recovered_str)
+    except json.JSONDecodeError:
+        return None
